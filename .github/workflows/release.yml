@@ -22,7 +22,11 @@ permissions:
   contents: read
 
 jobs:
+  # self-test's release-npm dry run declares write scopes; a called workflow cannot exceed its caller's grant
   test:
+    permissions:
+      contents: write
+      packages: write
     uses: $/.github/workflows/self-test.yml
 
   release:
