@@ -356,7 +356,7 @@ jobs:
           PACKAGES: ${{ inputs.pack-packages }}
           CMD: ${{ inputs.pack-smoke-command }}
           NODE_AUTH_TOKEN: ${{ secrets.packages-token || github.token }}
-        run: |
+        run: | # zizmor: ignore[adhoc-packages] installs the packed tarballs under test
           set -euo pipefail
           export PACK_DIR="$RUNNER_TEMP/pack"
           rm -rf "$PACK_DIR" && mkdir -p "$PACK_DIR/app"
@@ -372,7 +372,7 @@ jobs:
           (( count > 0 )) || { echo "::error::no package to pack"; exit 1; }
           cd "$PACK_DIR/app"
           npm init -y >/dev/null
-          npm install --no-audit --no-fund "$PACK_DIR"/*.tgz # zizmor: ignore[adhoc-packages] the packed tarballs under test
+          npm install --no-audit --no-fund "$PACK_DIR"/*.tgz
           bash -euo pipefail -c "$CMD"
 
       - name: Supply chain
