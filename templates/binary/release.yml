@@ -1,0 +1,100 @@
+name: Release
+
+# Binary release: CI, then version commit + tag + GitHub release (release-tag), then each target is
+# built from the tag in this workflow and uploaded with SHA256SUMS. The toolchain setup stays here.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version part to raise
+        type: choice
+        options: [patch, minor, major, prerelease, prepatch, preminor, premajor]
+        default: patch
+      dry-run:
+        description: Test and build, but push and release nothing
+        type: boolean
+        default: false
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  tag:
+    needs: ci
+    uses: boshold/gh-actions-public/.github/workflows/release-tag.yml@v1
+    permissions:
+      contents: write
+    with:
+      bump: ${{ inputs.bump }}
+      dry-run: ${{ inputs.dry-run }}
+      # Files that carry the version, e.g. Cargo.toml or VERSION.
+      version-files: VERSION
+
+  build:
+    needs: tag
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-amd64
+            runner: ubuntu-latest
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+          - target: darwin-arm64
+            runner: macos-latest
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.dry-run && github.ref || needs.tag.outputs.tag }}
+          persist-credentials: false
+
+      # Toolchain setup (Go, Rust, ...) goes here.
+
+      - name: Build
+        shell: bash
+        env:
+          VERSION: ${{ needs.tag.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          make build VERSION="$VERSION" OUT="dist/my-tool-$TARGET"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  assets:
+    needs: [tag, build]
+    if: ${{ !inputs.dry-run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+
+      - uses: boshold/gh-actions-public/.github/actions/release-assets@v1
+        with:
+          tag: ${{ needs.tag.outputs.tag }}
+          files: dist/*
+          checksums: "true"

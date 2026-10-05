@@ -1,0 +1,82 @@
+name: Deploy preview
+
+# One shared preview slot: the PR with the "preview" label owns it. Adding the label elsewhere moves
+# the slot; removing it, or closing the PR, restores the placeholder page.
+
+on:
+  pull_request:
+    types: [labeled, unlabeled, synchronize, reopened, closed]
+
+concurrency:
+  group: deploy-preview
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  slot:
+    runs-on: ${{ (github.event.repository.private && vars.CI_RUNNER_LIGHT) || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    outputs:
+      deploy: ${{ steps.slot.outputs.deploy }}
+      placeholder: ${{ steps.slot.outputs.placeholder }}
+    steps:
+      - id: slot
+        uses: boshold/gh-actions-public/.github/actions/preview-slot@v1
+        with:
+          token: ${{ github.token }}
+
+  ci:
+    needs: slot
+    if: needs.slot.outputs.deploy == 'true'
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: write
+    with:
+      stage: fast
+      image-push: true
+      image-tags: pr-${{ github.event.pull_request.number }}
+    secrets: inherit
+
+  deploy:
+    needs: [slot, ci]
+    if: needs.slot.outputs.deploy == 'true'
+    uses: boshold/gh-actions-public/.github/workflows/deploy-dokploy.yml@v1
+    permissions:
+      contents: read
+      deployments: write
+    with:
+      environment: preview
+      project: my-app
+      image: ${{ needs.ci.outputs.image }}
+      revision: ${{ github.sha }}
+      health-url: https://preview.example.com/api/health
+      application-id: ${{ vars.DOKPLOY_APPLICATION_ID_PREVIEW }}
+      dokploy-url: ${{ vars.DOKPLOY_URL }}
+    secrets:
+      dokploy-api-key: ${{ secrets.DOKPLOY_API_KEY_PREVIEW }}
+
+  placeholder:
+    needs: slot
+    if: needs.slot.outputs.placeholder == 'true'
+    uses: boshold/gh-actions-public/.github/workflows/deploy-dokploy.yml@v1
+    permissions:
+      contents: read
+      deployments: write
+    with:
+      mode: placeholder
+      environment: preview
+      project: my-app
+      # Pin by digest (see the preview-placeholder workflow summary).
+      image: ghcr.io/boshold/preview-placeholder:main
+      revision: ${{ github.event.pull_request.head.sha || github.sha }}
+      health-url: https://preview.example.com/api/health
+      application-id: ${{ vars.DOKPLOY_APPLICATION_ID_PREVIEW }}
+      dokploy-url: ${{ vars.DOKPLOY_URL }}
+    secrets:
+      dokploy-api-key: ${{ secrets.DOKPLOY_API_KEY_PREVIEW }}

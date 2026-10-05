@@ -1,0 +1,201 @@
+name: Self test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+concurrency:
+  group: self-test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  ACTIONLINT: rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+  SHELLCHECK: koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d
+  ZIZMOR: ghcr.io/zizmorcore/zizmor:1.30.1@sha256:a2eb396d886c053073405c7a980f2139ba2248ec172243cfa3841e57196e8101
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # actionlint 1.7.12 does not know `uses: $/...` and job.workflow_* yet. A copy with `./` keeps the action input checks.
+      - name: actionlint
+        shell: bash
+        run: |
+          set -euo pipefail
+          copy="$RUNNER_TEMP/lint"
+          cp -r . "$copy"
+          sed -i 's#uses: \$/#uses: ./#' "$copy"/.github/workflows/*.yml "$copy"/.github/actions/*/action.yml
+          docker run --rm -v "$copy:/repo" -w /repo "$ACTIONLINT" -color \
+            -ignore 'property "workflow_(repository|sha)" is not defined'
+          mapfile -t templates < <(find templates -name '*.yml' ! -name dependabot.yml | sort)
+          docker run --rm -v "$PWD:/repo" -w /repo "$ACTIONLINT" -color \
+            -ignore 'could not read reusable workflow file for "./.github/workflows/ci.yml"' "${templates[@]}"
+
+      - name: shellcheck
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t scripts < <(find .github/actions tests -name '*.sh' | sort)
+          docker run --rm -v "$PWD:/repo" -w /repo "$SHELLCHECK" -x -P SCRIPTDIR "${scripts[@]}"
+
+      - name: zizmor
+        shell: bash
+        run: docker run --rm -v "$PWD:/repo" -w /repo "$ZIZMOR" --offline --min-severity low .
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      - name: Unit tests
+        run: node --test 'tests/**/*.test.mjs'
+
+  image-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Scenario tests
+        run: tests/image-smoke/run.sh
+
+  prisma-scenarios:
+    name: prisma-scenarios (${{ matrix.provider }})
+    strategy:
+      fail-fast: false
+      matrix:
+        provider: [sqlite, postgresql]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: services
+        if: matrix.provider == 'postgresql'
+        uses: $/.github/actions/services
+        with:
+          postgres-version: "18"
+
+      - uses: $/.github/actions/setup
+        with:
+          working-directory: tests/prisma-check/fixture
+
+      - name: Scenario tests
+        env:
+          PROVIDER: ${{ matrix.provider }}
+          PG_URL: postgresql://postgres:postgres@127.0.0.1:5432
+          PG_CONTAINER: ${{ steps.services.outputs.postgres-container }}
+        run: tests/prisma-check/run.sh "$PROVIDER"
+
+      # The action wiring itself against the untouched fixture
+      - name: Action smoke test
+        uses: $/.github/actions/prisma-check
+        with:
+          level: strict
+          database-url: ${{ matrix.provider == 'sqlite' && 'file:./smoke.db' || steps.services.outputs.database-url }}
+          schema: prisma/${{ matrix.provider }}/schema.prisma
+          migrations: prisma/${{ matrix.provider }}/migrations
+          working-directory: tests/prisma-check/fixture
+
+  # The reusable workflows below run against tests/fixtures/app. `$/` inside them resolves to this
+  # commit, so a pull request tests its own actions.
+  nuxt-fast:
+    uses: $/.github/workflows/nuxt-ci.yml
+    with:
+      stage: fast
+      working-directory: tests/fixtures/app
+      install-directory: tests/fixtures/app
+
+  nuxt-fast-parallel:
+    uses: $/.github/workflows/nuxt-ci.yml
+    with:
+      stage: fast
+      parallel: true
+      working-directory: tests/fixtures/app
+      install-directory: tests/fixtures/app
+
+  nuxt-full:
+    uses: $/.github/workflows/nuxt-ci.yml
+    with:
+      stage: release
+      working-directory: tests/fixtures/app
+      install-directory: tests/fixtures/app
+      postgres-version: "18"
+      postgres-extra-databases: second
+      mailpit-version: v1.30
+      migrate-command: echo "migrate against $DATABASE_URL"
+      seed-command: echo seed
+      e2e-command: echo e2e
+      env: |
+        DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres
+      image-build: true
+      image-context: tests/fixtures/app
+      image-env: |
+        DEPLOYMENT_ENVIRONMENT=ci
+      extra-tests: |
+        [
+          {"name": "server e2e", "stage": "full", "background": ["PORT=3100 node server.mjs"],
+           "wait-url": "http://127.0.0.1:3100/api/health", "env": {"PORT": "3100"}, "command": "pnpm e2e"},
+          {"name": "release only", "stage": "release", "runner": "light", "command": "echo release stage"}
+        ]
+
+  node-release:
+    uses: $/.github/workflows/node-ci.yml
+    with:
+      stage: release
+      working-directory: tests/fixtures/app
+      install-directory: tests/fixtures/app
+      prepare-command: ""
+      build-command: pnpm build
+      playground-build-command: ""
+      pack-packages: tests/fixtures/app
+      pack-smoke-command: npx fixture-app --version
+      node-versions: '["22", "24"]'
+      os: '["linux", "arm64"]'
+      matrix-command: pnpm test
+
+  prisma-check:
+    uses: $/.github/workflows/prisma-check.yml
+    with:
+      working-directory: tests/prisma-check/fixture
+      install-directory: tests/prisma-check/fixture
+      level: strict
+      targets: |
+        [
+          {"name": "postgresql", "postgres-version": "18",
+           "schema": "prisma/postgresql/schema.prisma", "migrations": "prisma/postgresql/migrations"},
+          {"name": "sqlite", "database-url": "file:./parity.db",
+           "schema": "prisma/sqlite/schema.prisma", "migrations": "prisma/sqlite/migrations"}
+        ]
+
+  # Dry runs: version, build, smoke, scan. Nothing is pushed, published or released.
+  release-tag:
+    uses: $/.github/workflows/release-tag.yml
+    with:
+      bump: minor
+      dry-run: true
+      working-directory: tests/fixtures/app
+
+  release-image:
+    uses: $/.github/workflows/release-image.yml
+    with:
+      bump: patch
+      dry-run: true
+      working-directory: tests/fixtures/app
+      context: tests/fixtures/app
+      smoke-env: |
+        DEPLOYMENT_ENVIRONMENT=ci

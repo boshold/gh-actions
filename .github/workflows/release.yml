@@ -1,0 +1,60 @@
+name: Release
+
+# Releases this repository: full self test, then tag vX.Y.Z, create the GitHub release and move the
+# floating major tag (v1) that callers reference.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      dry-run:
+        description: Test and version, push nothing
+        type: boolean
+        default: false
+
+concurrency: release
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    uses: $/.github/workflows/self-test.yml
+
+  release:
+    needs: test
+    permissions:
+      contents: write
+    uses: $/.github/workflows/release-tag.yml
+    with:
+      bump: ${{ inputs.bump }}
+      dry-run: ${{ inputs.dry-run }}
+
+  major-tag:
+    needs: release
+    if: ${{ !inputs.dry-run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Move the major tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ needs.release.outputs.version }}
+          SHA: ${{ needs.release.outputs.sha }}
+        run: |
+          set -euo pipefail
+          major="v${VERSION%%.*}"
+          if gh api "repos/$REPO/git/ref/tags/$major" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/$REPO/git/refs/tags/$major" -f sha="$SHA" -F force=true >/dev/null
+          else
+            gh api -X POST "repos/$REPO/git/refs" -f ref="refs/tags/$major" -f sha="$SHA" >/dev/null
+          fi
+          echo "$major -> $SHA ($VERSION)" | tee -a "$GITHUB_STEP_SUMMARY"

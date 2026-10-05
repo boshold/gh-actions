@@ -1,0 +1,70 @@
+name: npm publish
+description: >-
+  Packs and publishes packages to npmjs (token or OIDC trusted publishing) or GitHub Packages.
+  Runs in the caller's job, so an npm trusted publisher bound to the caller's workflow file works.
+  Versions already on the registry are skipped, so a failed release can be re-run.
+  Needs Node (and pnpm for package directories); OIDC needs permissions id-token: write.
+
+inputs:
+  packages:
+    description: >-
+      Newline-separated package directories or .tgz files, published in this order (dependencies
+      first); a JSON array works too. Empty is every non-private pnpm workspace package
+    default: ""
+  working-directory:
+    description: Base directory for relative package paths
+    default: "."
+  registry:
+    description: npmjs or github
+    default: npmjs
+  access:
+    description: npm access for npmjs (public, restricted)
+    default: public
+  provenance:
+    description: auto (on for npmjs from a public repository with OIDC available), true or false
+    default: auto
+  tag:
+    description: Dist-tag; empty is latest, or the prerelease id (1.2.0-rc.1 -> rc)
+    default: ""
+  dry-run:
+    default: "false"
+  stage:
+    description: Use npm stage publish (npmjs; versions wait for a maintainer's 2FA approval). Needs npm >= 11.15
+    default: "false"
+  npm-version:
+    description: Install this npm version globally when the current one is lower, e.g. 11.6.2
+    default: ""
+  token:
+    description: Registry token; empty uses OIDC trusted publishing for npmjs and github.token for github
+    default: ""
+  version:
+    description: Expected version; a package with another version fails
+    default: ""
+
+outputs:
+  published:
+    description: JSON array of name@version published (or would be, in a dry run)
+    value: ${{ steps.publish.outputs.published }}
+  skipped:
+    description: JSON array of name@version already on the registry
+    value: ${{ steps.publish.outputs.skipped }}
+
+runs:
+  using: composite
+  steps:
+    - id: publish
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        PACKAGES: ${{ inputs.packages }}
+        REGISTRY: ${{ inputs.registry }}
+        ACCESS: ${{ inputs.access }}
+        PROVENANCE: ${{ inputs.provenance }}
+        DIST_TAG: ${{ inputs.tag }}
+        DRY_RUN: ${{ inputs.dry-run }}
+        STAGE: ${{ inputs.stage }}
+        NPM_VERSION: ${{ inputs.npm-version }}
+        PUBLISH_TOKEN: ${{ inputs.token || (inputs.registry == 'github' && github.token) || '' }}
+        EXPECTED_VERSION: ${{ inputs.version }}
+        REPO_PRIVATE: ${{ github.event.repository.private }}
+      run: bash "$GITHUB_ACTION_PATH/publish.sh"

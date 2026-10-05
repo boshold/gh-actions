@@ -1,0 +1,16 @@
+{
+  "name": "@boshold/gh-actions-fixture-app",
+  "version": "0.0.0",
+  "private": false,
+  "type": "module",
+  "packageManager": "pnpm@10.31.0",
+  "bin": { "fixture-app": "./server.mjs" },
+  "files": ["server.mjs"],
+  "scripts": {
+    "lint": "node --check server.mjs",
+    "typecheck": "node --check server.mjs",
+    "test": "node --test",
+    "build": "node -e \"require('node:fs').mkdirSync('dist',{recursive:true})\" --input-type=commonjs",
+    "e2e": "node e2e.mjs"
+  }
+}

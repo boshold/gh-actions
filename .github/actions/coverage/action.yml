@@ -1,0 +1,80 @@
+name: Coverage
+description: >-
+  Vitest coverage comment on same-repository pull requests, one per suite (up to 5). Skips on
+  other events and fork PRs (no write token there). Needs permissions pull-requests: write.
+
+inputs:
+  working-directory:
+    default: "."
+  json-summary:
+    description: >-
+      Newline-separated coverage-summary.json paths relative to working-directory, optionally
+      labeled as "label=path". coverage-final.json next to each is used when present
+    default: coverage/coverage-summary.json
+  name:
+    description: Comment title prefix; the suite label is appended when there are several suites
+    default: Coverage
+  github-token:
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - id: suites
+      if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        SUMMARIES: ${{ inputs.json-summary }}
+        NAME: ${{ inputs.name }}
+      run: bash "$GITHUB_ACTION_PATH/suites.sh"
+
+    - if: steps.suites.outputs.summary-1 != ''
+      uses: davelosert/vitest-coverage-report-action@c4bbc33a89b7ace0e63d35f1f7d4bcee31155a73 # v2.13.0
+      with:
+        github-token: ${{ inputs.github-token }}
+        working-directory: ${{ inputs.working-directory }}
+        name: ${{ steps.suites.outputs.name-1 }}
+        json-summary-path: ${{ steps.suites.outputs.summary-1 }}
+        json-final-path: ${{ steps.suites.outputs.final-1 }}
+        file-coverage-mode: ${{ steps.suites.outputs.final-1 != '' && 'changes' || 'none' }}
+
+    - if: steps.suites.outputs.summary-2 != ''
+      uses: davelosert/vitest-coverage-report-action@c4bbc33a89b7ace0e63d35f1f7d4bcee31155a73 # v2.13.0
+      with:
+        github-token: ${{ inputs.github-token }}
+        working-directory: ${{ inputs.working-directory }}
+        name: ${{ steps.suites.outputs.name-2 }}
+        json-summary-path: ${{ steps.suites.outputs.summary-2 }}
+        json-final-path: ${{ steps.suites.outputs.final-2 }}
+        file-coverage-mode: ${{ steps.suites.outputs.final-2 != '' && 'changes' || 'none' }}
+
+    - if: steps.suites.outputs.summary-3 != ''
+      uses: davelosert/vitest-coverage-report-action@c4bbc33a89b7ace0e63d35f1f7d4bcee31155a73 # v2.13.0
+      with:
+        github-token: ${{ inputs.github-token }}
+        working-directory: ${{ inputs.working-directory }}
+        name: ${{ steps.suites.outputs.name-3 }}
+        json-summary-path: ${{ steps.suites.outputs.summary-3 }}
+        json-final-path: ${{ steps.suites.outputs.final-3 }}
+        file-coverage-mode: ${{ steps.suites.outputs.final-3 != '' && 'changes' || 'none' }}
+
+    - if: steps.suites.outputs.summary-4 != ''
+      uses: davelosert/vitest-coverage-report-action@c4bbc33a89b7ace0e63d35f1f7d4bcee31155a73 # v2.13.0
+      with:
+        github-token: ${{ inputs.github-token }}
+        working-directory: ${{ inputs.working-directory }}
+        name: ${{ steps.suites.outputs.name-4 }}
+        json-summary-path: ${{ steps.suites.outputs.summary-4 }}
+        json-final-path: ${{ steps.suites.outputs.final-4 }}
+        file-coverage-mode: ${{ steps.suites.outputs.final-4 != '' && 'changes' || 'none' }}
+
+    - if: steps.suites.outputs.summary-5 != ''
+      uses: davelosert/vitest-coverage-report-action@c4bbc33a89b7ace0e63d35f1f7d4bcee31155a73 # v2.13.0
+      with:
+        github-token: ${{ inputs.github-token }}
+        working-directory: ${{ inputs.working-directory }}
+        name: ${{ steps.suites.outputs.name-5 }}
+        json-summary-path: ${{ steps.suites.outputs.summary-5 }}
+        json-final-path: ${{ steps.suites.outputs.final-5 }}
+        file-coverage-mode: ${{ steps.suites.outputs.final-5 != '' && 'changes' || 'none' }}

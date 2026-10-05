@@ -1,0 +1,22 @@
+name: Preview slot
+description: >-
+  Selects one labeled same-repository pull request for a shared preview slot (removing the label from the
+  previous owner) or tells the caller to restore the idle placeholder. Fork pull requests never deploy.
+
+inputs:
+  label:
+    description: Label that owns the preview slot
+    default: preview
+  token:
+    description: Token with pull-requests write (label removal)
+    default: ${{ github.token }}
+
+outputs:
+  deploy:
+    description: true when the triggering pull request should be built and deployed
+  placeholder:
+    description: true when the idle placeholder should be restored
+
+runs:
+  using: node24
+  main: index.mjs

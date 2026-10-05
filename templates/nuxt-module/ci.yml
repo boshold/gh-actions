@@ -1,0 +1,40 @@
+name: CI
+
+# Nuxt module CI (preset: dev:prepare, prepack, playground build). Pull requests run the fast
+# stage, main the full stage, the release the release stage (node matrix, extra tests).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+    inputs:
+      stage:
+        type: string
+        default: release
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+  packages: read
+  pull-requests: write
+
+jobs:
+  ci:
+    uses: boshold/gh-actions-public/.github/workflows/node-ci.yml@v1
+    with:
+      stage: ${{ inputs.stage || (github.event_name == 'push' && 'full') || 'fast' }}
+      preset: nuxt-module
+      typecheck-command: pnpm test:types
+      coverage-report: true
+      node-versions: '["22", "24"]'
+      # Production bundle smoke of the playground, release stage only.
+      # extra-tests: |
+      #   [{"name": "playground-prod", "stage": "release", "working-directory": "playground",
+      #     "setup": "pnpm build", "background": ["PORT=3366 node .output/server/index.mjs"],
+      #     "wait-url": "http://127.0.0.1:3366/", "command": "BASE_URL=http://127.0.0.1:3366 node test/prod-smoke.mjs"}]
+    secrets:
+      packages-token: ${{ secrets.PACKAGES_READ_TOKEN }}

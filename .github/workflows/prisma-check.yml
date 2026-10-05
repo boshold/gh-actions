@@ -1,0 +1,246 @@
+name: Prisma check
+
+# Reusable Prisma migration check across one or more databases (e.g. Postgres + SQLite).
+# One job per target; a target with postgres-version gets Postgres and the standard runner, others
+# (SQLite) the light runner. With two or more targets a parity job compares the migration folders.
+# Jobs declare no permissions: callers grant contents: read (+ packages: read for GitHub Packages).
+
+on:
+  workflow_call:
+    inputs:
+      targets:
+        type: string
+        required: true
+        description: >-
+          JSON array. Keys: name, database-url (empty with postgres-version = the started Postgres),
+          postgres-version, schema, migrations, test-command. Example:
+          [{"name":"postgres","postgres-version":"18"},
+          {"name":"sqlite","database-url":"file:./ci.db","schema":"prisma/sqlite/schema.prisma","migrations":"prisma/sqlite/migrations"}]
+      level:
+        type: string
+        default: standard
+        description: basic, standard or strict (see the prisma-check action)
+      schema:
+        type: string
+        default: prisma/schema.prisma
+        description: Default for targets without their own schema
+      migrations:
+        type: string
+        default: prisma/migrations
+        description: Default for targets without their own migrations
+      require-transaction:
+        type: boolean
+        default: false
+      fail-on-unknown-base:
+        type: string
+        default: ""
+        description: true/false; empty is true at strict
+      allow-destructive-label:
+        type: string
+        default: migration:destructive
+      prisma-command:
+        type: string
+        default: pnpm exec prisma
+      parity-command:
+        type: string
+        default: ""
+        description: Runs once on the light runner, e.g. a check that per-provider schemas are in sync
+      runner-light:
+        type: string
+        default: ""
+      runner-standard:
+        type: string
+        default: ""
+      working-directory:
+        type: string
+        default: "."
+      install-directory:
+        type: string
+        default: "."
+      node-version:
+        type: string
+        default: ""
+      pnpm-version:
+        type: string
+        default: ""
+      registry:
+        type: string
+        default: github
+      registry-scope:
+        type: string
+        default: ""
+      install-command:
+        type: string
+        default: pnpm install --frozen-lockfile
+      cache:
+        type: string
+        default: auto
+      prepare-command:
+        type: string
+        default: ""
+        description: Runs after install in every job, e.g. pnpm exec prisma generate
+      env:
+        type: string
+        default: ""
+        description: Multiline KEY=VALUE for every job; DATABASE_URL is set per target
+      timeout-minutes:
+        type: number
+        default: 15
+    secrets:
+      packages-token:
+        required: false
+        description: Read token for npm.pkg.github.com; falls back to github.token
+      env-secrets:
+        required: false
+
+jobs:
+  target:
+    # Never the database URL: it may carry credentials.
+    name: ${{ matrix.target.name || format('target {0}', strategy.job-index) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(inputs.targets) }}
+    runs-on: ${{ matrix.target.postgres-version && (inputs.runner-standard || (github.event.repository.private && vars.CI_RUNNER_STANDARD) || 'ubuntu-latest') || (inputs.runner-light || (github.event.repository.private && vars.CI_RUNNER_LIGHT) || 'ubuntu-latest') }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Base checks compare against the PR base / previous tip.
+          fetch-depth: 0
+
+      - name: Start Postgres
+        id: services
+        if: matrix.target.postgres-version
+        uses: $/.github/actions/services
+        with:
+          postgres-version: ${{ matrix.target.postgres-version }}
+          name-suffix: ${{ github.run_id }}-${{ github.run_attempt }}-prisma-${{ strategy.job-index }}
+
+      - uses: $/.github/actions/setup
+        with:
+          node-version: ${{ inputs.node-version }}
+          pnpm-version: ${{ inputs.pnpm-version }}
+          registry: ${{ inputs.registry }}
+          scope: ${{ inputs.registry-scope }}
+          token: ${{ secrets.packages-token }}
+          install-command: ${{ inputs.install-command }}
+          working-directory: ${{ inputs.install-directory }}
+          cache: ${{ inputs.cache }}
+
+      - name: Export env
+        uses: $/.github/actions/run
+        with:
+          env: ${{ inputs.env }}
+          env-secrets: ${{ secrets.env-secrets }}
+          export: "true"
+
+      # After the env export, so the target wins over a DATABASE_URL in env.
+      - name: Resolve DATABASE_URL
+        shell: bash
+        env:
+          TARGET_URL: ${{ matrix.target.database-url }}
+          SERVICES_URL: ${{ steps.services.outputs.database-url }}
+        run: |
+          set -euo pipefail
+          url="${TARGET_URL:-$SERVICES_URL}"
+          [[ -n "$url" ]] || { echo "::error::target needs database-url or postgres-version"; exit 1; }
+          echo "DATABASE_URL=$url" >> "$GITHUB_ENV"
+
+      - name: Prepare
+        if: inputs.prepare-command != ''
+        uses: $/.github/actions/run
+        with:
+          name: prepare
+          command: ${{ inputs.prepare-command }}
+          working-directory: ${{ inputs.working-directory }}
+
+      - name: Prisma check
+        uses: $/.github/actions/prisma-check
+        with:
+          level: ${{ inputs.level }}
+          database-url: ${{ env.DATABASE_URL }}
+          schema: ${{ matrix.target.schema || inputs.schema }}
+          migrations: ${{ matrix.target.migrations || inputs.migrations }}
+          working-directory: ${{ inputs.working-directory }}
+          prisma-command: ${{ inputs.prisma-command }}
+          allow-destructive-label: ${{ inputs.allow-destructive-label }}
+          require-transaction: ${{ inputs.require-transaction }}
+          fail-on-unknown-base: ${{ inputs.fail-on-unknown-base }}
+
+      - name: Test
+        if: matrix.target.test-command
+        uses: $/.github/actions/run
+        with:
+          name: test
+          command: ${{ matrix.target.test-command }}
+          working-directory: ${{ inputs.working-directory }}
+
+  parity:
+    if: inputs.parity-command != '' || fromJSON(inputs.targets)[1] != null
+    runs-on: ${{ inputs.runner-light || (github.event.repository.private && vars.CI_RUNNER_LIGHT) || 'ubuntu-latest' }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Migration folders match across targets
+        shell: bash
+        env:
+          TARGETS: ${{ inputs.targets }}
+          DEFAULT_MIGRATIONS: ${{ inputs.migrations }}
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          set -euo pipefail
+          reference=""
+          reference_dir=""
+          while IFS= read -r dir; do
+            [[ -d "$dir" ]] || { echo "::error::migrations folder $dir does not exist"; exit 1; }
+            names="$(find "$dir" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)"
+            if [[ -z "$reference_dir" ]]; then
+              reference="$names"; reference_dir="$dir"
+            elif [[ "$names" != "$reference" ]]; then
+              echo "::error::migration folders in ${dir} differ from ${reference_dir}"
+              diff <(echo "$reference") <(echo "$names") || true
+              exit 1
+            fi
+          done < <(jq -r --arg d "$DEFAULT_MIGRATIONS" '[.[] | .migrations // $d] | unique[]' <<< "$TARGETS")
+          echo "migration folders match"
+
+      - if: inputs.parity-command != ''
+        uses: $/.github/actions/setup
+        with:
+          node-version: ${{ inputs.node-version }}
+          pnpm-version: ${{ inputs.pnpm-version }}
+          registry: ${{ inputs.registry }}
+          scope: ${{ inputs.registry-scope }}
+          token: ${{ secrets.packages-token }}
+          install-command: ${{ inputs.install-command }}
+          working-directory: ${{ inputs.install-directory }}
+          cache: ${{ inputs.cache }}
+
+      - name: Export env
+        if: inputs.parity-command != ''
+        uses: $/.github/actions/run
+        with:
+          env: ${{ inputs.env }}
+          env-secrets: ${{ secrets.env-secrets }}
+          export: "true"
+
+      - name: Prepare
+        if: inputs.parity-command != '' && inputs.prepare-command != ''
+        uses: $/.github/actions/run
+        with:
+          name: prepare
+          command: ${{ inputs.prepare-command }}
+          working-directory: ${{ inputs.working-directory }}
+
+      - name: Parity
+        if: inputs.parity-command != ''
+        uses: $/.github/actions/run
+        with:
+          name: parity
+          command: ${{ inputs.parity-command }}
+          working-directory: ${{ inputs.working-directory }}

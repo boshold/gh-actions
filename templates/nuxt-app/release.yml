@@ -1,0 +1,83 @@
+name: Release
+
+# Release CI, then version commit + tag + image of that commit (pushed only after smoke and scan),
+# then production. The tag is pushed with github.token, which starts no other workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version part to raise
+        type: choice
+        options: [patch, minor, major, prerelease, prepatch, preminor, premajor]
+        default: patch
+      dry-run:
+        description: Test, build and scan, but push, release and deploy nothing
+        type: boolean
+        default: false
+      skip-backup:
+        description: Break glass - deploy production without a backup
+        type: boolean
+        default: false
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: write
+    with:
+      stage: release
+    secrets: inherit
+
+  release:
+    needs: ci
+    uses: boshold/gh-actions-public/.github/workflows/release-image.yml@v1
+    permissions:
+      contents: write
+      packages: write
+    with:
+      bump: ${{ inputs.bump }}
+      dry-run: ${{ inputs.dry-run }}
+      postgres-version: "18"
+      mailpit-version: v1.30
+      # The entrypoint migrates the empty database before the server starts.
+      smoke-env: |
+        APP_BASE_URL=http://localhost:3000
+        DATABASE_URL=postgresql://postgres:postgres@localhost:5432/postgres
+        DEPLOYMENT_ENVIRONMENT=stage
+        SMTP_HOST=localhost
+        SMTP_PORT=1025
+        SMTP_FROM=app@ci.invalid
+    secrets:
+      packages-token: ${{ secrets.PACKAGES_READ_TOKEN }}
+      # release-token: ${{ secrets.RELEASE_TOKEN }}  # GitHub App token for protected branches
+
+  production:
+    needs: release
+    if: ${{ !inputs.dry-run }}
+    uses: boshold/gh-actions-public/.github/workflows/deploy-dokploy.yml@v1
+    permissions:
+      contents: read
+      deployments: write
+    with:
+      environment: production
+      project: my-app
+      image: ${{ needs.release.outputs.image }}
+      revision: ${{ needs.release.outputs.sha }}
+      health-url: https://app.example.com/api/health
+      application-id: ${{ vars.DOKPLOY_APPLICATION_ID_PRODUCTION }}
+      dokploy-url: ${{ vars.DOKPLOY_URL }}
+      # Production refuses to deploy without a backup that ran first.
+      backup-schedule-id: ${{ vars.DOKPLOY_BACKUP_SCHEDULE_ID_PRODUCTION }}
+      skip-backup: ${{ inputs.skip-backup }}
+    secrets:
+      dokploy-api-key: ${{ secrets.DOKPLOY_API_KEY_PRODUCTION }}

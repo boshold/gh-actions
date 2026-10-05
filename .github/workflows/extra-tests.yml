@@ -1,0 +1,335 @@
+name: Extra tests
+
+# Reusable matrix of extra test jobs, shared by node-ci.yml and nuxt-ci.yml (called via $/).
+# Entries are filtered by stage. Keys: name, command (required); stage (fast|full|release, default
+# full), runner (light|standard|arm64|macos), services, compose, compose-services, hosts, setup,
+# background[], wait-url, wait-seconds, env (KEY=VALUE string or object), playwright, bun,
+# node-version, artifacts, working-directory, timeout.
+# Jobs declare no permissions: they inherit the caller's grant.
+
+on:
+  workflow_call:
+    inputs:
+      tests:
+        type: string
+        required: true
+        description: JSON array of extra tests
+      stage:
+        type: string
+        default: fast
+      runner-light:
+        type: string
+        default: ""
+      runner-standard:
+        type: string
+        default: ""
+      runner-arm64:
+        type: string
+        default: ""
+      runner-macos:
+        type: string
+        default: ""
+      working-directory:
+        type: string
+        default: "."
+      install-directory:
+        type: string
+        default: "."
+      node-version:
+        type: string
+        default: ""
+      pnpm-version:
+        type: string
+        default: ""
+      registry:
+        type: string
+        default: github
+      registry-scope:
+        type: string
+        default: ""
+      install-command:
+        type: string
+        default: pnpm install --frozen-lockfile
+      cache:
+        type: string
+        default: auto
+      env:
+        type: string
+        default: ""
+      prepare-command:
+        type: string
+        default: ""
+      postgres-version:
+        type: string
+        default: ""
+      postgres-user:
+        type: string
+        default: postgres
+      postgres-password:
+        type: string
+        default: postgres
+      postgres-db:
+        type: string
+        default: postgres
+      postgres-extra-databases:
+        type: string
+        default: ""
+      mailpit-version:
+        type: string
+        default: ""
+      compose-file:
+        type: string
+        default: ""
+      playwright-browsers:
+        type: string
+        default: chromium
+      playwright-install-command:
+        type: string
+        default: ""
+      timeout-minutes:
+        type: number
+        default: 20
+        description: Default per test
+    secrets:
+      packages-token:
+        required: false
+      env-secrets:
+        required: false
+
+env:
+  NUXT_TELEMETRY_DISABLED: "1"
+
+jobs:
+  plan:
+    runs-on: ${{ inputs.runner-light || (github.event.repository.private && vars.CI_RUNNER_LIGHT) || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    outputs:
+      tests: ${{ steps.plan.outputs.tests }}
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+      - name: Select extra tests for this stage
+        id: plan
+        shell: bash
+        env:
+          STAGE: ${{ inputs.stage }}
+          EXTRA_TESTS: ${{ inputs.tests }}
+          DEFAULT_TIMEOUT: ${{ inputs.timeout-minutes }}
+        run: |
+          set -euo pipefail
+          tests=$(jq -c --arg stage "$STAGE" --argjson timeout "$DEFAULT_TIMEOUT" '
+            def rank: {"fast": 0, "full": 1, "release": 2}[.] // error("invalid stage: \(.)");
+            def lines: if . == null then "" elif type == "array" then map(tostring) | join("\n")
+              elif type == "object" then to_entries | map("\(.key)=\(.value)") | join("\n") else tostring end;
+            def words: if . == null then "" elif type == "array" then map(tostring) | join(" ") else tostring end;
+            if type != "array" then error("extra-tests must be a JSON array") else . end
+            | ($stage | rank) as $current
+            | map(
+                if (.name | type) != "string" or (.command | type) != "string" then error("every extra test needs name and command") else . end
+                | (.stage // "full") as $s
+                | select(($s | rank) <= $current)
+                | {
+                    name, command, stage: $s,
+                    slug: (.name | gsub("[^A-Za-z0-9._-]"; "-")),
+                    runner: (.runner // "standard"),
+                    services: (.services // false),
+                    compose: (.compose // ""),
+                    "compose-services": (.["compose-services"] | words),
+                    hosts: (.hosts | words),
+                    setup: (.setup // ""),
+                    background: (.background | lines),
+                    "wait-url": (.["wait-url"] // ""),
+                    "wait-seconds": (.["wait-seconds"] // 120),
+                    env: (.env | lines),
+                    playwright: (.playwright // false),
+                    bun: (.bun // "" | tostring),
+                    "node-version": (.["node-version"] // "" | tostring),
+                    artifacts: (.artifacts | lines),
+                    "working-directory": (.["working-directory"] // ""),
+                    timeout: (.timeout // $timeout)
+                  }
+              )' <<< "$EXTRA_TESTS")
+          echo "tests=$tests" >> "$GITHUB_OUTPUT"
+          echo "count=$(jq length <<< "$tests")" >> "$GITHUB_OUTPUT"
+          jq -r '"extra tests for this stage: \(map(.name) | join(", "))"' <<< "$tests"
+
+  extra:
+    name: ${{ matrix.test.name }}
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    strategy:
+      fail-fast: false
+      matrix:
+        test: ${{ fromJSON(needs.plan.outputs.tests) }}
+    runs-on: >-
+      ${{
+        matrix.test.runner == 'light' && (inputs.runner-light || (github.event.repository.private && vars.CI_RUNNER_LIGHT) || 'ubuntu-latest') ||
+        matrix.test.runner == 'arm64' && (inputs.runner-arm64 || (github.event.repository.private && vars.CI_RUNNER_ARM64) || 'ubuntu-24.04-arm') ||
+        matrix.test.runner == 'macos' && (inputs.runner-macos || (github.event.repository.private && vars.CI_RUNNER_MACOS) || 'macos-latest') ||
+        (inputs.runner-standard || (github.event.repository.private && vars.CI_RUNNER_STANDARD) || 'ubuntu-latest')
+      }}
+    timeout-minutes: ${{ matrix.test.timeout }}
+    env:
+      EXTRA_LOGS: ${{ github.workspace }}/../extra-logs
+      WORKDIR: ${{ matrix.test.working-directory || inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Map hosts to loopback
+        if: matrix.test.hosts != ''
+        shell: bash
+        env:
+          HOSTS: ${{ matrix.test.hosts }}
+        run: echo "127.0.0.1 $HOSTS" | sudo tee -a /etc/hosts
+
+      - name: Start services
+        if: matrix.test.services && (inputs.postgres-version != '' || inputs.mailpit-version != '' || inputs.compose-file != '')
+        uses: $/.github/actions/services
+        with:
+          postgres-version: ${{ inputs.postgres-version }}
+          postgres-user: ${{ inputs.postgres-user }}
+          postgres-password: ${{ inputs.postgres-password }}
+          postgres-db: ${{ inputs.postgres-db }}
+          postgres-extra-databases: ${{ inputs.postgres-extra-databases }}
+          mailpit-version: ${{ inputs.mailpit-version }}
+          compose-file: ${{ inputs.compose-file }}
+          name-suffix: ${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.test.slug }}
+
+      - name: Start compose stack
+        if: matrix.test.compose != ''
+        shell: bash
+        env:
+          COMPOSE_FILE_PATH: ${{ matrix.test.compose }}
+          COMPOSE_SERVICES: ${{ matrix.test.compose-services }}
+        run: |
+          set -euo pipefail
+          read -r -a services <<< "$COMPOSE_SERVICES"
+          docker compose -f "$COMPOSE_FILE_PATH" up -d --wait "${services[@]}"
+
+      - uses: $/.github/actions/setup
+        with:
+          node-version: ${{ matrix.test.node-version || inputs.node-version }}
+          pnpm-version: ${{ inputs.pnpm-version }}
+          registry: ${{ inputs.registry }}
+          scope: ${{ inputs.registry-scope }}
+          token: ${{ secrets.packages-token }}
+          install-command: ${{ inputs.install-command }}
+          working-directory: ${{ inputs.install-directory }}
+          bun: ${{ matrix.test.bun }}
+          cache: ${{ inputs.cache }}
+
+      - name: Export env
+        uses: $/.github/actions/run
+        with:
+          env: |
+            ${{ inputs.env }}
+            ${{ matrix.test.env }}
+          env-secrets: ${{ secrets.env-secrets }}
+          export: "true"
+
+      - name: Prepare
+        if: inputs.prepare-command != ''
+        uses: $/.github/actions/run
+        with:
+          name: prepare
+          command: ${{ inputs.prepare-command }}
+          working-directory: ${{ env.WORKDIR }}
+
+      - name: Playwright
+        if: matrix.test.playwright
+        uses: $/.github/actions/playwright
+        with:
+          working-directory: ${{ env.WORKDIR }}
+          browsers: ${{ inputs.playwright-browsers }}
+          install-command: ${{ inputs.playwright-install-command }}
+          cache: ${{ inputs.cache }}
+
+      - name: Setup command
+        if: matrix.test.setup != ''
+        uses: $/.github/actions/run
+        with:
+          name: setup
+          command: ${{ matrix.test.setup }}
+          working-directory: ${{ env.WORKDIR }}
+
+      - name: Start background processes
+        if: matrix.test.background != ''
+        shell: bash
+        working-directory: ${{ env.WORKDIR }}
+        env:
+          BACKGROUND: ${{ matrix.test.background }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$EXTRA_LOGS"
+          i=0
+          while IFS= read -r cmd; do
+            [[ -z "$cmd" ]] && continue
+            i=$((i + 1))
+            nohup bash -euo pipefail -c "$cmd" > "$EXTRA_LOGS/background-$i.log" 2>&1 &
+            echo "$!" >> "$EXTRA_LOGS/pids"
+            echo "started background $i (pid $!): $cmd"
+          done <<< "$BACKGROUND"
+
+      - name: Wait for the URL
+        if: matrix.test.wait-url != ''
+        shell: bash
+        env:
+          WAIT_URL: ${{ matrix.test.wait-url }}
+          WAIT_SECONDS: ${{ matrix.test.wait-seconds }}
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + WAIT_SECONDS))
+          until curl -fsS --max-time 5 -o /dev/null "$WAIT_URL"; do
+            if (( SECONDS >= deadline )); then
+              echo "::error::$WAIT_URL not ready after ${WAIT_SECONDS}s"
+              tail -n 100 "$EXTRA_LOGS"/background-*.log 2>/dev/null || true
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "$WAIT_URL is ready"
+
+      - name: Test
+        uses: $/.github/actions/run
+        with:
+          name: ${{ matrix.test.name }}
+          command: ${{ matrix.test.command }}
+          working-directory: ${{ env.WORKDIR }}
+
+      - name: Collect logs
+        if: failure()
+        shell: bash
+        env:
+          COMPOSE_FILE_PATH: ${{ matrix.test.compose }}
+        run: |
+          mkdir -p "$EXTRA_LOGS"
+          if [[ -n "$COMPOSE_FILE_PATH" ]]; then
+            docker compose -f "$COMPOSE_FILE_PATH" logs --no-color > "$EXTRA_LOGS/compose.log" 2>&1 || true
+          fi
+          cp -r "$EXTRA_LOGS" ./.extra-logs 2>/dev/null || true
+
+      - name: Upload failure artifact
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: extra-${{ matrix.test.slug }}-failure
+          path: |
+            .extra-logs/
+            ${{ matrix.test.artifacts }}
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Stop background processes
+        if: always()
+        shell: bash
+        env:
+          COMPOSE_FILE_PATH: ${{ matrix.test.compose }}
+        run: |
+          if [[ -f "$EXTRA_LOGS/pids" ]]; then
+            while read -r pid; do kill "$pid" 2>/dev/null || true; done < "$EXTRA_LOGS/pids"
+          fi
+          if [[ -n "$COMPOSE_FILE_PATH" ]]; then
+            docker compose -f "$COMPOSE_FILE_PATH" down -v --remove-orphans >/dev/null 2>&1 || true
+          fi
+          rm -rf "$EXTRA_LOGS"

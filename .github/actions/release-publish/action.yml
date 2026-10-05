@@ -1,0 +1,49 @@
+name: Release publish
+description: >-
+  gate: fails unless the run is on the release branch. publish: atomically pushes the release commit and tag
+  with an explicit token (nothing persisted), then creates the GitHub release idempotently and uploads assets.
+
+inputs:
+  mode:
+    description: gate (branch check only, run before any build) or publish
+    default: publish
+  tag:
+    description: Release tag (publish)
+    default: ""
+  sha:
+    description: Release commit the tag points at (publish)
+    default: ""
+  branch:
+    description: Branch to release from and push to; defaults to the repository default branch
+    default: ""
+  dry-run:
+    description: Skip the branch gate, push and release
+    default: "false"
+  resumed:
+    description: release-version resumed output; allows an existing remote tag at the same commit
+    default: "false"
+  prerelease:
+    description: Mark the GitHub release as prerelease
+    default: "false"
+  make-latest:
+    description: auto (only the highest stable version), true or false
+    default: auto
+  assets:
+    description: Newline-separated globs uploaded to the release; existing names are kept
+    default: ""
+  working-directory:
+    description: Git checkout directory
+    default: .
+  token:
+    description: Token with contents write; use a GitHub App token for protected branches
+    default: ${{ github.token }}
+
+outputs:
+  release-id:
+    description: GitHub release id
+  url:
+    description: GitHub release URL
+
+runs:
+  using: node24
+  main: index.mjs

@@ -1,0 +1,320 @@
+name: Release image
+
+# Reusable release of a container image: bump the version, build the image from the release commit,
+# boot it and prove the revision, scan it, push it under sha-<sha> only, push the release commit and
+# tag, create the GitHub release (+ SBOM), then add the version tags (latest only for the highest
+# stable version). Nothing reaches the registry before smoke and scan passed, and no version tag
+# exists before the git tag does.
+# Callers run their CI (stage: release) first and grant contents: write and packages: write.
+# Every step after the push is idempotent: a failed run is fixed by re-running it.
+
+on:
+  workflow_call:
+    inputs:
+      bump:
+        type: string
+        required: true
+        description: patch, minor, major, prerelease, prepatch, preminor or premajor
+      preid:
+        type: string
+        default: rc
+      dry-run:
+        type: boolean
+        default: false
+        description: Bump, build, smoke and scan; push and release nothing
+      version-files:
+        type: string
+        default: ""
+        description: Newline-separated extra files carrying the version, e.g. Cargo.toml
+      working-directory:
+        type: string
+        default: "."
+        description: Directory holding the root package.json for the version bump
+      image:
+        type: string
+        default: ""
+        description: Image name without tag; empty is ghcr.io/<owner>/<repo>
+      registry:
+        type: string
+        default: ghcr.io
+      context:
+        type: string
+        default: "."
+      dockerfile:
+        type: string
+        default: ""
+        description: Empty is <context>/Dockerfile
+      build-args:
+        type: string
+        default: ""
+        description: Extra build args; DEPLOYMENT_REVISION and APP_VERSION are always passed. Secrets go through BuildKit secret github_npm_token
+      platforms:
+        type: string
+        default: ""
+        description: Platforms for the push, e.g. linux/amd64,linux/arm64; smoke and scan use the runner platform
+      provenance:
+        type: string
+        default: min
+        description: min, max (exposes build args) or false
+      latest:
+        type: string
+        default: auto
+        description: Move the latest tag; auto = only for the highest stable version
+      make-latest:
+        type: string
+        default: auto
+        description: GitHub release "latest" flag (auto, true, false)
+      port:
+        type: number
+        default: 3000
+      health-path:
+        type: string
+        default: /api/health
+        description: Must answer {"status":"ok","revision":"<sha>"}
+      smoke-env:
+        type: string
+        default: ""
+        description: KEY=VALUE for the smoke container
+      smoke-run-args:
+        type: string
+        default: ""
+        description: Extra docker run args, one per line, e.g. --volume=/data
+      smoke-command:
+        type: string
+        default: ""
+        description: Runs after the container is healthy, with SMOKE_URL
+      smoke-memory:
+        type: string
+        default: ""
+      postgres-version:
+        type: string
+        default: ""
+      postgres-user:
+        type: string
+        default: postgres
+      postgres-password:
+        type: string
+        default: postgres
+      postgres-db:
+        type: string
+        default: postgres
+      postgres-extra-databases:
+        type: string
+        default: ""
+      mailpit-version:
+        type: string
+        default: ""
+      compose-file:
+        type: string
+        default: ""
+      scan:
+        type: boolean
+        default: true
+        description: Fail on fixable HIGH/CRITICAL vulnerabilities and attach an SBOM to the release
+      runner:
+        type: string
+        default: ""
+      timeout-minutes:
+        type: number
+        default: 30
+    secrets:
+      packages-token:
+        required: false
+        description: BuildKit secret github_npm_token; falls back to github.token
+      release-token:
+        required: false
+        description: Push token (e.g. GitHub App) for protected branches; falls back to github.token
+      registry-password:
+        required: false
+        description: Password for registry; falls back to github.token
+      smoke-env-secrets:
+        required: false
+        description: KEY=VALUE for the smoke container, values masked
+    outputs:
+      version:
+        value: ${{ jobs.release.outputs.version }}
+      tag:
+        value: ${{ jobs.release.outputs.tag }}
+      sha:
+        description: The release commit, which the image reports as its revision
+        value: ${{ jobs.release.outputs.sha }}
+      prerelease:
+        value: ${{ jobs.release.outputs.prerelease }}
+      digest:
+        value: ${{ jobs.release.outputs.digest }}
+      image:
+        description: Image pinned by digest, for deployments of the released bytes
+        value: ${{ jobs.release.outputs.image }}
+
+jobs:
+  release:
+    runs-on: ${{ inputs.runner || (github.event.repository.private && vars.CI_RUNNER_STANDARD) || 'ubuntu-latest' }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      sha: ${{ steps.version.outputs.sha }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      digest: ${{ steps.push.outputs.digest }}
+      image: ${{ steps.push.outputs.digest && format('{0}@{1}', steps.name.outputs.image, steps.push.outputs.digest) || '' }}
+    steps:
+
+      - name: Require the release branch
+        uses: $/.github/actions/release-publish
+        with:
+          mode: gate
+          dry-run: ${{ inputs.dry-run }}
+
+      # The branch, not the run's sha: a re-run has to see the release commit it created.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: version
+        uses: $/.github/actions/release-version
+        with:
+          bump: ${{ inputs.bump }}
+          preid: ${{ inputs.preid }}
+          files: ${{ inputs.version-files }}
+          working-directory: ${{ inputs.working-directory }}
+
+      - id: name
+        name: Resolve the image name
+        shell: bash
+        env:
+          IMAGE: ${{ inputs.image }}
+          REGISTRY: ${{ inputs.registry }}
+        run: |
+          set -euo pipefail
+          image="${IMAGE:-$REGISTRY/$GITHUB_REPOSITORY}"
+          image="${image,,}"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "sbom=sbom-${image##*/}.spdx.json" >> "$GITHUB_OUTPUT"
+
+      - name: Start services
+        if: inputs.postgres-version != '' || inputs.mailpit-version != '' || inputs.compose-file != ''
+        uses: $/.github/actions/services
+        with:
+          postgres-version: ${{ inputs.postgres-version }}
+          postgres-user: ${{ inputs.postgres-user }}
+          postgres-password: ${{ inputs.postgres-password }}
+          postgres-db: ${{ inputs.postgres-db }}
+          postgres-extra-databases: ${{ inputs.postgres-extra-databases }}
+          mailpit-version: ${{ inputs.mailpit-version }}
+          compose-file: ${{ inputs.compose-file }}
+
+      - id: build
+        name: Build image
+        uses: $/.github/actions/image-build
+        with:
+          context: ${{ inputs.context }}
+          dockerfile: ${{ inputs.dockerfile }}
+          image: ${{ steps.name.outputs.image }}
+          tags: sha-${{ steps.version.outputs.sha }}
+          build-args: ${{ inputs.build-args }}
+          registry: ${{ inputs.registry }}
+          registry-password: ${{ secrets.registry-password || github.token }}
+          secret-token: ${{ secrets.packages-token || github.token }}
+          revision: ${{ steps.version.outputs.sha }}
+          version: ${{ steps.version.outputs.version }}
+          push: "false"
+          load: "true"
+
+      - name: Boot the image and prove the revision
+        uses: $/.github/actions/image-smoke
+        with:
+          image: ${{ steps.build.outputs.image }}
+          revision: ${{ steps.version.outputs.sha }}
+          port: ${{ inputs.port }}
+          health-path: ${{ inputs.health-path }}
+          env: ${{ inputs.smoke-env }}
+          env-secrets: ${{ secrets.smoke-env-secrets }}
+          run-args: ${{ inputs.smoke-run-args }}
+          smoke-command: ${{ inputs.smoke-command }}
+          memory: ${{ inputs.smoke-memory }}
+
+      - name: Scan the image
+        if: inputs.scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.build.outputs.image }}
+          format: table
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Generate the SBOM
+        if: inputs.scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.build.outputs.image }}
+          format: spdx-json
+          output: ${{ runner.temp }}/${{ steps.name.outputs.sbom }}
+          exit-code: "0"
+
+      # Only the immutable sha tag; version tags follow the git tag below.
+      - id: push
+        name: Push image
+        if: ${{ !inputs.dry-run }}
+        uses: $/.github/actions/image-build
+        with:
+          context: ${{ inputs.context }}
+          dockerfile: ${{ inputs.dockerfile }}
+          image: ${{ steps.name.outputs.image }}
+          tags: sha-${{ steps.version.outputs.sha }}
+          build-args: ${{ inputs.build-args }}
+          platforms: ${{ inputs.platforms }}
+          registry: ${{ inputs.registry }}
+          registry-password: ${{ secrets.registry-password || github.token }}
+          secret-token: ${{ secrets.packages-token || github.token }}
+          revision: ${{ steps.version.outputs.sha }}
+          version: ${{ steps.version.outputs.version }}
+          provenance: ${{ inputs.provenance }}
+          push: "true"
+
+      - name: Push the release commit and tag, create the release
+        uses: $/.github/actions/release-publish
+        with:
+          tag: ${{ steps.version.outputs.tag }}
+          sha: ${{ steps.version.outputs.sha }}
+          dry-run: ${{ inputs.dry-run }}
+          resumed: ${{ steps.version.outputs.resumed }}
+          prerelease: ${{ steps.version.outputs.prerelease }}
+          make-latest: ${{ inputs.make-latest }}
+          assets: ${{ inputs.scan && format('{0}/{1}', runner.temp, steps.name.outputs.sbom) || '' }}
+          token: ${{ secrets.release-token || github.token }}
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        if: ${{ !inputs.dry-run }}
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.registry-password || github.token }}
+
+      - name: Publish the version tags
+        if: ${{ !inputs.dry-run }}
+        shell: bash
+        env:
+          IMAGE: ${{ steps.name.outputs.image }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+          LATEST: ${{ inputs.latest }}
+        run: |
+          set -euo pipefail
+          tags=(--tag "$IMAGE:$TAG" --tag "$IMAGE:$VERSION")
+          case "$LATEST" in
+            true) move_latest=true ;;
+            false) move_latest=false ;;
+            auto)
+              highest=$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
+              move_latest=$([[ "$PRERELEASE" != true && "$highest" == "$TAG" ]] && echo true || echo false) ;;
+            *) echo "::error::latest must be auto, true or false"; exit 1 ;;
+          esac
+          [[ "$move_latest" == true ]] && tags+=(--tag "$IMAGE:latest")
+          echo "latest: $move_latest"
+          docker buildx imagetools create "${tags[@]}" "$IMAGE@$DIGEST"

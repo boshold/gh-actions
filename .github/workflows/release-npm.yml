@@ -1,0 +1,162 @@
+name: Release npm
+
+# Reusable release of pnpm packages to GitHub Packages: bump every workspace manifest, build, push the
+# release commit and tag, create the GitHub release, publish the non-private packages.
+# npmjs.com: use release-tag.yml + the npm-publish action in a caller job instead (OIDC trusted
+# publishing binds to the caller workflow file); see templates/ts-lib-npmjs.
+# Callers run their CI (stage: release) first, grant contents: write and packages: write.
+# Every step after the push is idempotent: a failed run is fixed by re-running it.
+
+on:
+  workflow_call:
+    inputs:
+      bump:
+        type: string
+        required: true
+        description: patch, minor, major, prerelease, prepatch, preminor or premajor
+      preid:
+        type: string
+        default: rc
+      dry-run:
+        type: boolean
+        default: false
+        description: Bump and build, but push, publish and release nothing
+      version-files:
+        type: string
+        default: ""
+        description: Newline-separated extra files carrying the version, e.g. Cargo.toml
+      packages:
+        type: string
+        default: ""
+        description: Newline-separated package dirs in publish order; empty is every non-private workspace package
+      build-command:
+        type: string
+        default: pnpm build
+      dist-tag:
+        type: string
+        default: ""
+        description: Empty is latest, or the prerelease id for prereleases
+      working-directory:
+        type: string
+        default: "."
+      node-version:
+        type: string
+        default: ""
+      pnpm-version:
+        type: string
+        default: ""
+      registry-scope:
+        type: string
+        default: ""
+        description: Empty is @<repository owner>
+      install-command:
+        type: string
+        default: pnpm install --frozen-lockfile
+      env:
+        type: string
+        default: ""
+        description: Multiline KEY=VALUE for the build
+      make-latest:
+        type: string
+        default: auto
+      runner:
+        type: string
+        default: ""
+      timeout-minutes:
+        type: number
+        default: 20
+    secrets:
+      packages-token:
+        required: false
+        description: Read token for installing from npm.pkg.github.com; falls back to github.token
+      release-token:
+        required: false
+        description: Push token (e.g. GitHub App) for protected branches; falls back to github.token
+      env-secrets:
+        required: false
+    outputs:
+      version:
+        value: ${{ jobs.release.outputs.version }}
+      tag:
+        value: ${{ jobs.release.outputs.tag }}
+      sha:
+        value: ${{ jobs.release.outputs.sha }}
+      prerelease:
+        value: ${{ jobs.release.outputs.prerelease }}
+
+jobs:
+  release:
+    runs-on: ${{ inputs.runner || (github.event.repository.private && vars.CI_RUNNER_STANDARD) || 'ubuntu-latest' }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      sha: ${{ steps.version.outputs.sha }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+
+      # Before any build; a dry run may come from any branch.
+      - name: Require the release branch
+        uses: $/.github/actions/release-publish
+        with:
+          mode: gate
+          dry-run: ${{ inputs.dry-run }}
+
+      # The branch, not the run's sha: a re-run has to see the release commit it created.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: $/.github/actions/setup
+        with:
+          node-version: ${{ inputs.node-version }}
+          pnpm-version: ${{ inputs.pnpm-version }}
+          registry: github
+          scope: ${{ inputs.registry-scope }}
+          token: ${{ secrets.packages-token }}
+          install-command: ${{ inputs.install-command }}
+          working-directory: ${{ inputs.working-directory }}
+          # Release builds never reuse a cache.
+          cache: "off"
+
+      - id: version
+        uses: $/.github/actions/release-version
+        with:
+          bump: ${{ inputs.bump }}
+          preid: ${{ inputs.preid }}
+          files: ${{ inputs.version-files }}
+          working-directory: ${{ inputs.working-directory }}
+
+      - name: Build
+        if: inputs.build-command != ''
+        uses: $/.github/actions/run
+        with:
+          name: build
+          command: ${{ inputs.build-command }}
+          working-directory: ${{ inputs.working-directory }}
+          env: ${{ inputs.env }}
+          env-secrets: ${{ secrets.env-secrets }}
+
+      - name: Push the release commit and tag, create the release
+        uses: $/.github/actions/release-publish
+        with:
+          tag: ${{ steps.version.outputs.tag }}
+          sha: ${{ steps.version.outputs.sha }}
+          dry-run: ${{ inputs.dry-run }}
+          resumed: ${{ steps.version.outputs.resumed }}
+          prerelease: ${{ steps.version.outputs.prerelease }}
+          make-latest: ${{ inputs.make-latest }}
+          token: ${{ secrets.release-token || github.token }}
+
+      - name: Publish
+        uses: $/.github/actions/npm-publish
+        with:
+          packages: ${{ inputs.packages }}
+          working-directory: ${{ inputs.working-directory }}
+          registry: github
+          tag: ${{ inputs.dist-tag }}
+          version: ${{ steps.version.outputs.version }}
+          dry-run: ${{ inputs.dry-run }}
+          token: ${{ github.token }}

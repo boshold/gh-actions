@@ -1,0 +1,127 @@
+name: Release tag
+
+# Reusable release front for projects that build/publish in their own jobs (binaries, npmjs via OIDC):
+# bump the version files, push the release commit and tag, create the GitHub release, optionally
+# attach assets from caller artifacts built before this job. Later caller jobs check out the `tag`
+# output and attach assets with the release-assets action.
+# Callers run their CI (stage: release) first and grant contents: write (+ actions: read for artifacts).
+
+on:
+  workflow_call:
+    inputs:
+      bump:
+        type: string
+        required: true
+        description: patch, minor, major, prerelease, prepatch, preminor or premajor
+      preid:
+        type: string
+        default: rc
+      dry-run:
+        type: boolean
+        default: false
+        description: Bump locally, but push and release nothing
+      version-files:
+        type: string
+        default: ""
+        description: Newline-separated extra files carrying the version, e.g. VERSION or Cargo.toml
+      working-directory:
+        type: string
+        default: "."
+      make-latest:
+        type: string
+        default: auto
+      artifacts:
+        type: string
+        default: ""
+        description: Artifact name pattern from this run downloaded into release-assets/ (e.g. dist-*)
+      assets:
+        type: string
+        default: ""
+        description: Newline-separated globs uploaded to the release; empty with artifacts is release-assets/* (the downloaded files)
+      checksums:
+        type: boolean
+        default: true
+        description: Upload SHA256SUMS for the assets
+      runner:
+        type: string
+        default: ""
+      timeout-minutes:
+        type: number
+        default: 10
+    secrets:
+      release-token:
+        required: false
+        description: Push token (e.g. GitHub App) for protected branches; falls back to github.token
+    outputs:
+      version:
+        value: ${{ jobs.release.outputs.version }}
+      tag:
+        value: ${{ jobs.release.outputs.tag }}
+      sha:
+        description: The release commit; in a dry run it exists only on the runner
+        value: ${{ jobs.release.outputs.sha }}
+      prerelease:
+        value: ${{ jobs.release.outputs.prerelease }}
+      release-url:
+        value: ${{ jobs.release.outputs.url }}
+
+jobs:
+  release:
+    runs-on: ${{ inputs.runner || (github.event.repository.private && vars.CI_RUNNER_LIGHT) || 'ubuntu-latest' }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      sha: ${{ steps.version.outputs.sha }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      url: ${{ steps.publish.outputs.url }}
+    steps:
+
+      - name: Require the release branch
+        uses: $/.github/actions/release-publish
+        with:
+          mode: gate
+          dry-run: ${{ inputs.dry-run }}
+
+      # The branch, not the run's sha: a re-run has to see the release commit it created.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: version
+        uses: $/.github/actions/release-version
+        with:
+          bump: ${{ inputs.bump }}
+          preid: ${{ inputs.preid }}
+          files: ${{ inputs.version-files }}
+          working-directory: ${{ inputs.working-directory }}
+
+      - name: Download artifacts
+        if: inputs.artifacts != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: ${{ inputs.artifacts }}
+          path: release-assets
+          merge-multiple: true
+
+      - id: publish
+        name: Push the release commit and tag, create the release
+        uses: $/.github/actions/release-publish
+        with:
+          tag: ${{ steps.version.outputs.tag }}
+          sha: ${{ steps.version.outputs.sha }}
+          dry-run: ${{ inputs.dry-run }}
+          resumed: ${{ steps.version.outputs.resumed }}
+          prerelease: ${{ steps.version.outputs.prerelease }}
+          make-latest: ${{ inputs.make-latest }}
+          token: ${{ secrets.release-token || github.token }}
+
+      - name: Upload assets
+        if: ${{ !inputs.dry-run && (inputs.assets != '' || inputs.artifacts != '') }}
+        uses: $/.github/actions/release-assets
+        with:
+          tag: ${{ steps.version.outputs.tag }}
+          files: ${{ inputs.assets || 'release-assets/*' }}
+          checksums: ${{ inputs.checksums }}

@@ -1,0 +1,510 @@
+name: Node CI
+
+# Reusable CI for TS libraries, CLIs and Nuxt modules (pnpm).
+# Stages: fast = check job (prepare, lint, typecheck, test, build); full = + slow suites, e2e,
+# playground build, pack-install smoke; release = full + node/os matrix + release-stage extra tests.
+# Jobs declare no permissions: callers grant contents: read (+ packages: read for GitHub Packages,
+# pull-requests: write for coverage-report).
+
+on:
+  workflow_call:
+    inputs:
+      stage:
+        type: string
+        default: fast
+        description: fast, full or release
+      parallel:
+        type: boolean
+        default: false
+        description: Split the check job into lint, typecheck and test jobs
+      preset:
+        type: string
+        default: ""
+        description: Empty or nuxt-module (auto prepare/build/playground commands)
+      runner-light:
+        type: string
+        default: ""
+      runner-standard:
+        type: string
+        default: ""
+      runner-arm64:
+        type: string
+        default: ""
+      runner-macos:
+        type: string
+        default: ""
+      working-directory:
+        type: string
+        default: "."
+      install-directory:
+        type: string
+        default: "."
+      node-version:
+        type: string
+        default: ""
+        description: Empty reads .nvmrc, .node-version or package.json engines, else 24
+      pnpm-version:
+        type: string
+        default: ""
+      registry:
+        type: string
+        default: github
+        description: Registry of the scoped packages, github or npmjs
+      registry-scope:
+        type: string
+        default: ""
+      install-command:
+        type: string
+        default: pnpm install --frozen-lockfile
+      cache:
+        type: string
+        default: auto
+        description: auto (GitHub cache unless the runner sets CI_LOCAL_CACHE=1) or off
+      env:
+        type: string
+        default: ""
+        description: Multiline KEY=VALUE exported to every job
+      prepare-command:
+        type: string
+        default: auto
+        description: auto is pnpm dev:prepare for nuxt-module, else none; empty disables
+      lint-command:
+        type: string
+        default: pnpm lint
+      lint-cache-path:
+        type: string
+        default: .eslintcache
+        description: Lint cache relative to working-directory (lint must use --cache); empty disables
+      typecheck-command:
+        type: string
+        default: pnpm typecheck
+      test-command:
+        type: string
+        default: pnpm test
+      build-command:
+        type: string
+        default: auto
+        description: auto is pnpm prepack for nuxt-module, else pnpm build; empty disables
+      playground-build-command:
+        type: string
+        default: auto
+        description: Full stage; auto is pnpm dev:build for nuxt-module, else none
+      coverage-report:
+        type: boolean
+        default: false
+      coverage-summary-paths:
+        type: string
+        default: coverage/coverage-summary.json
+      postgres-version:
+        type: string
+        default: ""
+        description: Starts Postgres for the check, matrix and extra jobs
+      postgres-user:
+        type: string
+        default: postgres
+      postgres-password:
+        type: string
+        default: postgres
+      postgres-db:
+        type: string
+        default: postgres
+      postgres-extra-databases:
+        type: string
+        default: ""
+      mailpit-version:
+        type: string
+        default: ""
+      compose-file:
+        type: string
+        default: ""
+      playwright:
+        type: boolean
+        default: false
+        description: Install browsers for the full-stage suites
+      playwright-browsers:
+        type: string
+        default: chromium
+      playwright-install-command:
+        type: string
+        default: ""
+      test-full-command:
+        type: string
+        default: ""
+        description: Slow suites (full and release stage)
+      e2e-command:
+        type: string
+        default: ""
+        description: Full and release stage
+      pack-smoke-command:
+        type: string
+        default: ""
+        description: >-
+          Full stage: packs the packages, npm-installs the tarballs into an empty project and runs
+          this command there (PACK_DIR holds the tarballs), e.g. npx my-cli --version
+      pack-packages:
+        type: string
+        default: ""
+        description: Newline-separated package dirs to pack; empty is every non-private workspace package
+      supply-chain:
+        type: boolean
+        default: false
+        description: pnpm audit in the full stage
+      audit-dirs:
+        type: string
+        default: "."
+      node-versions:
+        type: string
+        default: ""
+        description: JSON array for the matrix job, e.g. ["22","24"]; empty skips it
+      os:
+        type: string
+        default: '["linux"]'
+        description: JSON array of linux, arm64, macos, windows for the matrix job
+      matrix-stage:
+        type: string
+        default: release
+        description: Lowest stage running the matrix job (full or release)
+      matrix-command:
+        type: string
+        default: ""
+        description: Matrix job command; empty runs build then test-command
+      failure-artifact-path:
+        type: string
+        default: ""
+      extra-tests:
+        type: string
+        default: ""
+        description: JSON array of extra test jobs, see README
+      check-timeout-minutes:
+        type: number
+        default: 15
+      matrix-timeout-minutes:
+        type: number
+        default: 20
+      extra-timeout-minutes:
+        type: number
+        default: 20
+    secrets:
+      packages-token:
+        required: false
+        description: Read token for npm.pkg.github.com; falls back to github.token
+      env-secrets:
+        required: false
+        description: Multiline KEY=VALUE exported like env, values masked
+
+env:
+  NUXT_TELEMETRY_DISABLED: "1"
+  PREPARE_CMD: ${{ inputs.prepare-command == 'auto' && (inputs.preset == 'nuxt-module' && 'pnpm dev:prepare' || '') || inputs.prepare-command }}
+  BUILD_CMD: ${{ inputs.build-command == 'auto' && (inputs.preset == 'nuxt-module' && 'pnpm prepack' || 'pnpm build') || inputs.build-command }}
+  PLAYGROUND_BUILD_CMD: ${{ inputs.playground-build-command == 'auto' && (inputs.preset == 'nuxt-module' && 'pnpm dev:build' || '') || inputs.playground-build-command }}
+
+jobs:
+  check:
+    name: ${{ matrix.part == 'all' && 'check' || matrix.part }}
+    strategy:
+      fail-fast: false
+      matrix:
+        part: ${{ fromJSON(inputs.parallel && '["lint","typecheck","test"]' || '["all"]') }}
+    runs-on: ${{ inputs.runner-light || (github.event.repository.private && vars.CI_RUNNER_LIGHT) || 'ubuntu-latest' }}
+    timeout-minutes: ${{ inputs.check-timeout-minutes }}
+    env:
+      CI_FULL: ${{ inputs.stage != 'fast' }}
+      # The test part also builds and runs the full-stage suites.
+      PART_TEST: ${{ matrix.part == 'all' || matrix.part == 'test' }}
+    steps:
+      - name: Validate inputs
+        shell: bash
+        env:
+          STAGE: ${{ inputs.stage }}
+          CACHE: ${{ inputs.cache }}
+          PRESET: ${{ inputs.preset }}
+          MATRIX_STAGE: ${{ inputs.matrix-stage }}
+        run: |
+          set -euo pipefail
+          [[ "$STAGE" =~ ^(fast|full|release)$ ]] || { echo "::error::stage must be fast, full or release, got '$STAGE'"; exit 1; }
+          [[ "$CACHE" =~ ^(auto|off)$ ]] || { echo "::error::cache must be auto or off, got '$CACHE'"; exit 1; }
+          [[ "$PRESET" =~ ^(|nuxt-module)$ ]] || { echo "::error::preset must be empty or nuxt-module, got '$PRESET'"; exit 1; }
+          [[ "$MATRIX_STAGE" =~ ^(full|release)$ ]] || { echo "::error::matrix-stage must be full or release, got '$MATRIX_STAGE'"; exit 1; }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Start services
+        if: env.PART_TEST == 'true' && (inputs.postgres-version != '' || inputs.mailpit-version != '' || inputs.compose-file != '')
+        uses: $/.github/actions/services
+        with:
+          postgres-version: ${{ inputs.postgres-version }}
+          postgres-user: ${{ inputs.postgres-user }}
+          postgres-password: ${{ inputs.postgres-password }}
+          postgres-db: ${{ inputs.postgres-db }}
+          postgres-extra-databases: ${{ inputs.postgres-extra-databases }}
+          mailpit-version: ${{ inputs.mailpit-version }}
+          compose-file: ${{ inputs.compose-file }}
+
+      - uses: $/.github/actions/setup
+        with:
+          node-version: ${{ inputs.node-version }}
+          pnpm-version: ${{ inputs.pnpm-version }}
+          registry: ${{ inputs.registry }}
+          scope: ${{ inputs.registry-scope }}
+          token: ${{ secrets.packages-token }}
+          install-command: ${{ inputs.install-command }}
+          working-directory: ${{ inputs.install-directory }}
+          cache: ${{ inputs.cache }}
+
+      - name: Export env
+        uses: $/.github/actions/run
+        with:
+          env: ${{ inputs.env }}
+          env-secrets: ${{ secrets.env-secrets }}
+          export: "true"
+
+      - name: Prepare
+        if: env.PREPARE_CMD != ''
+        uses: $/.github/actions/run
+        with:
+          name: prepare
+          command: ${{ env.PREPARE_CMD }}
+          working-directory: ${{ inputs.working-directory }}
+
+      - name: Detect cache mode
+        id: cache
+        shell: bash
+        env:
+          CACHE: ${{ inputs.cache }}
+        run: echo "enabled=$([[ "$CACHE" != off && "${CI_LOCAL_CACHE:-}" != 1 ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore lint cache
+        if: inputs.lint-command != '' && inputs.lint-cache-path != '' && steps.cache.outputs.enabled == 'true' && (matrix.part == 'all' || matrix.part == 'lint')
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ inputs.working-directory }}/${{ inputs.lint-cache-path }}
+          key: lint-${{ runner.os }}-${{ inputs.working-directory }}-${{ github.sha }}
+          restore-keys: lint-${{ runner.os }}-${{ inputs.working-directory }}-
+
+      - name: Lint
+        if: inputs.lint-command != '' && (matrix.part == 'all' || matrix.part == 'lint')
+        uses: $/.github/actions/run
+        with:
+          name: lint
+          command: ${{ inputs.lint-command }}
+          working-directory: ${{ inputs.working-directory }}
+
+      - name: Typecheck
+        if: inputs.typecheck-command != '' && (matrix.part == 'all' || matrix.part == 'typecheck')
+        uses: $/.github/actions/run
+        with:
+          name: typecheck
+          command: ${{ inputs.typecheck-command }}
+          working-directory: ${{ inputs.working-directory }}
+
+      - name: Test
+        if: inputs.test-command != '' && env.PART_TEST == 'true'
+        uses: $/.github/actions/run
+        with:
+          name: test
+          command: ${{ inputs.test-command }}
+          working-directory: ${{ inputs.working-directory }}
+
+      - name: Build
+        if: env.BUILD_CMD != '' && env.PART_TEST == 'true'
+        uses: $/.github/actions/run
+        with:
+          name: build
+          command: ${{ env.BUILD_CMD }}
+          working-directory: ${{ inputs.working-directory }}
+
+      - name: Playground build
+        if: env.CI_FULL == 'true' && env.PLAYGROUND_BUILD_CMD != '' && env.PART_TEST == 'true'
+        uses: $/.github/actions/run
+        with:
+          name: playground-build
+          command: ${{ env.PLAYGROUND_BUILD_CMD }}
+          working-directory: ${{ inputs.working-directory }}
+
+      - name: Playwright
+        if: env.CI_FULL == 'true' && inputs.playwright && env.PART_TEST == 'true'
+        uses: $/.github/actions/playwright
+        with:
+          working-directory: ${{ inputs.working-directory }}
+          browsers: ${{ inputs.playwright-browsers }}
+          install-command: ${{ inputs.playwright-install-command }}
+          cache: ${{ inputs.cache }}
+
+      - name: Test (full)
+        if: env.CI_FULL == 'true' && inputs.test-full-command != '' && env.PART_TEST == 'true'
+        uses: $/.github/actions/run
+        with:
+          name: test-full
+          command: ${{ inputs.test-full-command }}
+          working-directory: ${{ inputs.working-directory }}
+
+      - name: E2E
+        if: env.CI_FULL == 'true' && inputs.e2e-command != '' && env.PART_TEST == 'true'
+        uses: $/.github/actions/run
+        with:
+          name: e2e
+          command: ${{ inputs.e2e-command }}
+          working-directory: ${{ inputs.working-directory }}
+
+      # Installs the packed tarballs like a user would.
+      - name: Pack, install and smoke
+        if: env.CI_FULL == 'true' && inputs.pack-smoke-command != '' && env.PART_TEST == 'true'
+        shell: bash
+        env:
+          PACKAGES: ${{ inputs.pack-packages }}
+          CMD: ${{ inputs.pack-smoke-command }}
+          NODE_AUTH_TOKEN: ${{ secrets.packages-token || github.token }}
+        run: |
+          set -euo pipefail
+          export PACK_DIR="$RUNNER_TEMP/pack"
+          rm -rf "$PACK_DIR" && mkdir -p "$PACK_DIR/app"
+          if [[ -z "$PACKAGES" ]]; then
+            PACKAGES=$(pnpm -r ls --depth -1 --json | jq -r '.[] | select(.private != true) | .path')
+          fi
+          count=0
+          while IFS= read -r dir; do
+            [[ -z "$dir" ]] && continue
+            (cd "$dir" && pnpm pack --pack-destination "$PACK_DIR" >/dev/null)
+            count=$((count + 1))
+          done <<< "$PACKAGES"
+          (( count > 0 )) || { echo "::error::no package to pack"; exit 1; }
+          cd "$PACK_DIR/app"
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund "$PACK_DIR"/*.tgz
+          bash -euo pipefail -c "$CMD"
+
+      - name: Supply chain
+        if: env.CI_FULL == 'true' && inputs.supply-chain && env.PART_TEST == 'true'
+        uses: $/.github/actions/supply-chain
+        with:
+          audit-dirs: ${{ inputs.audit-dirs }}
+
+      - name: Coverage report
+        if: always() && inputs.coverage-report && env.PART_TEST == 'true'
+        uses: $/.github/actions/coverage
+        with:
+          working-directory: ${{ inputs.working-directory }}
+          json-summary: ${{ inputs.coverage-summary-paths }}
+
+      - name: Upload failure artifact
+        if: failure() && inputs.failure-artifact-path != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: check-failure-${{ matrix.part }}
+          path: ${{ inputs.failure-artifact-path }}
+          if-no-files-found: ignore
+          retention-days: 7
+
+  matrix:
+    name: node ${{ matrix.node }} (${{ matrix.os }})
+    if: inputs.node-versions != '' && (inputs.stage == 'release' || (inputs.stage == 'full' && inputs.matrix-stage == 'full'))
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ${{ fromJSON(inputs.node-versions || '["24"]') }}
+        os: ${{ fromJSON(inputs.os) }}
+    runs-on: >-
+      ${{
+        matrix.os == 'arm64' && (inputs.runner-arm64 || (github.event.repository.private && vars.CI_RUNNER_ARM64) || 'ubuntu-24.04-arm') ||
+        matrix.os == 'macos' && (inputs.runner-macos || (github.event.repository.private && vars.CI_RUNNER_MACOS) || 'macos-latest') ||
+        matrix.os == 'windows' && 'windows-latest' ||
+        (inputs.runner-standard || (github.event.repository.private && vars.CI_RUNNER_STANDARD) || 'ubuntu-latest')
+      }}
+    timeout-minutes: ${{ inputs.matrix-timeout-minutes }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Docker services exist on Linux runners only.
+      - name: Start services
+        if: (matrix.os == 'linux' || matrix.os == 'arm64') && (inputs.postgres-version != '' || inputs.mailpit-version != '' || inputs.compose-file != '')
+        uses: $/.github/actions/services
+        with:
+          postgres-version: ${{ inputs.postgres-version }}
+          postgres-user: ${{ inputs.postgres-user }}
+          postgres-password: ${{ inputs.postgres-password }}
+          postgres-db: ${{ inputs.postgres-db }}
+          postgres-extra-databases: ${{ inputs.postgres-extra-databases }}
+          mailpit-version: ${{ inputs.mailpit-version }}
+          compose-file: ${{ inputs.compose-file }}
+          name-suffix: ${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}
+
+      - uses: $/.github/actions/setup
+        with:
+          node-version: ${{ matrix.node }}
+          pnpm-version: ${{ inputs.pnpm-version }}
+          registry: ${{ inputs.registry }}
+          scope: ${{ inputs.registry-scope }}
+          token: ${{ secrets.packages-token }}
+          install-command: ${{ inputs.install-command }}
+          working-directory: ${{ inputs.install-directory }}
+          cache: ${{ inputs.cache }}
+
+      - name: Export env
+        uses: $/.github/actions/run
+        with:
+          env: ${{ inputs.env }}
+          env-secrets: ${{ secrets.env-secrets }}
+          export: "true"
+
+      - name: Prepare
+        if: env.PREPARE_CMD != ''
+        uses: $/.github/actions/run
+        with:
+          name: prepare
+          command: ${{ env.PREPARE_CMD }}
+          working-directory: ${{ inputs.working-directory }}
+
+      - name: Build
+        if: inputs.matrix-command == '' && env.BUILD_CMD != ''
+        uses: $/.github/actions/run
+        with:
+          name: build
+          command: ${{ env.BUILD_CMD }}
+          working-directory: ${{ inputs.working-directory }}
+
+      - name: Test
+        if: inputs.matrix-command != '' || inputs.test-command != ''
+        uses: $/.github/actions/run
+        with:
+          name: test
+          command: ${{ inputs.matrix-command || inputs.test-command }}
+          working-directory: ${{ inputs.working-directory }}
+
+  # Inherits the caller's grant; a permissions block here would fail callers that grant less.
+  extra: # zizmor: ignore[excessive-permissions]
+    if: inputs.extra-tests != ''
+    uses: $/.github/workflows/extra-tests.yml
+    with:
+      tests: ${{ inputs.extra-tests }}
+      prepare-command: ${{ inputs.prepare-command == 'auto' && (inputs.preset == 'nuxt-module' && 'pnpm dev:prepare' || '') || inputs.prepare-command }}
+      stage: ${{ inputs.stage }}
+      runner-light: ${{ inputs.runner-light }}
+      runner-standard: ${{ inputs.runner-standard }}
+      runner-arm64: ${{ inputs.runner-arm64 }}
+      runner-macos: ${{ inputs.runner-macos }}
+      working-directory: ${{ inputs.working-directory }}
+      install-directory: ${{ inputs.install-directory }}
+      node-version: ${{ inputs.node-version }}
+      pnpm-version: ${{ inputs.pnpm-version }}
+      registry: ${{ inputs.registry }}
+      registry-scope: ${{ inputs.registry-scope }}
+      install-command: ${{ inputs.install-command }}
+      cache: ${{ inputs.cache }}
+      env: ${{ inputs.env }}
+      postgres-version: ${{ inputs.postgres-version }}
+      postgres-user: ${{ inputs.postgres-user }}
+      postgres-password: ${{ inputs.postgres-password }}
+      postgres-db: ${{ inputs.postgres-db }}
+      postgres-extra-databases: ${{ inputs.postgres-extra-databases }}
+      mailpit-version: ${{ inputs.mailpit-version }}
+      compose-file: ${{ inputs.compose-file }}
+      playwright-browsers: ${{ inputs.playwright-browsers }}
+      playwright-install-command: ${{ inputs.playwright-install-command }}
+      timeout-minutes: ${{ inputs.extra-timeout-minutes }}
+    secrets:
+      packages-token: ${{ secrets.packages-token }}
+      env-secrets: ${{ secrets.env-secrets }}

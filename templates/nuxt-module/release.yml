@@ -1,0 +1,67 @@
+name: Release
+
+# Release CI, then version commit + tag, GitHub release and GitHub Packages publish. For npmjs.com
+# use templates/ts-lib-npmjs/release.yml. Optional: demo image + Dokploy deploy.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version part to raise
+        type: choice
+        options: [patch, minor, major, prerelease, prepatch, preminor, premajor]
+        default: patch
+      dry-run:
+        description: Test and build, but push, publish and release nothing
+        type: boolean
+        default: false
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+      packages: read
+      pull-requests: write
+    with:
+      stage: release
+    secrets: inherit
+
+  release:
+    needs: ci
+    uses: boshold/gh-actions-public/.github/workflows/release-npm.yml@v1
+    permissions:
+      contents: write
+      packages: write
+    with:
+      bump: ${{ inputs.bump }}
+      dry-run: ${{ inputs.dry-run }}
+      build-command: pnpm prepack
+    secrets:
+      packages-token: ${{ secrets.PACKAGES_READ_TOKEN }}
+
+  # Demo image from the release commit, deployed and stopped until a visitor wakes it.
+  # demo:
+  #   needs: release
+  #   uses: boshold/gh-actions-public/.github/workflows/release-demo.yml@v1
+  #   permissions:
+  #     contents: write
+  #     packages: write
+  #     deployments: write
+  #   with:
+  #     bump: ${{ inputs.bump }}
+  #     dry-run: ${{ inputs.dry-run }}
+  #     project: my-module
+  #     application-id: ${{ vars.DOKPLOY_APPLICATION_ID_DEMO }}
+  #     dokploy-url: ${{ vars.DOKPLOY_URL }}
+  #     health-url: https://demo.example.com/api/health
+  #   secrets:
+  #     packages-token: ${{ secrets.PACKAGES_READ_TOKEN }}
+  #     dokploy-api-key: ${{ secrets.DOKPLOY_API_KEY_DEMO }}

@@ -1,0 +1,184 @@
+name: Deploy to Dokploy
+
+# Reusable deployment of an already built image: record a GitHub deployment, point the Dokploy
+# application at the image, prove the running revision (rollback with health check otherwise) and
+# report back. Never builds: deploy the digest CI or release-image produced.
+# Callers grant contents: read and deployments: write. One deployment per application at a time.
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+        description: preview, stage or production
+      project:
+        type: string
+        required: true
+        description: Project name, used in the Dokploy deployment title
+      image:
+        type: string
+        required: true
+        description: Image to deploy, ideally pinned by digest
+      revision:
+        type: string
+        required: true
+        description: Full commit sha the health endpoint must report
+      health-url:
+        type: string
+        required: true
+        description: Endpoint returning {"status":"ok","revision":"<sha>"}
+      environment-url:
+        type: string
+        default: ""
+        description: Shown on the GitHub deployment; empty is the health URL's origin
+      application-id:
+        type: string
+        required: true
+        description: Dokploy application id for this environment
+      dokploy-url:
+        type: string
+        required: true
+      backup-schedule-id:
+        type: string
+        default: ""
+        description: Dokploy schedule run before the image changes; required for production
+      initial-image:
+        type: string
+        default: ""
+        description: Bootstrap image allowing a first production release without a backup
+      skip-backup:
+        type: boolean
+        default: false
+        description: Break glass; production deploys without a backup (logs a warning)
+      require-backup:
+        type: boolean
+        default: true
+        description: false skips the production backup requirement (apps without a database)
+      rollback:
+        type: boolean
+        default: true
+      mode:
+        type: string
+        default: deploy
+        description: deploy, placeholder (preview only) or stop
+      description:
+        type: string
+        default: ""
+        description: Dokploy deployment description; empty is the run URL
+      wait-minutes:
+        type: number
+        default: 10
+        description: Budget for each wait (deployment, health)
+      runner:
+        type: string
+        default: ""
+      timeout-minutes:
+        type: number
+        default: 30
+    secrets:
+      dokploy-api-key:
+        required: true
+    outputs:
+      previous-image:
+        value: ${{ jobs.deploy.outputs.previous-image }}
+      rolled-back:
+        value: ${{ jobs.deploy.outputs.rolled-back }}
+
+jobs:
+  deploy:
+    runs-on: ${{ inputs.runner || (github.event.repository.private && vars.CI_RUNNER_LIGHT) || 'ubuntu-latest' }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    concurrency:
+      group: dokploy-${{ inputs.application-id }}
+      cancel-in-progress: false
+    outputs:
+      previous-image: ${{ steps.deploy.outputs.previous-image }}
+      rolled-back: ${{ steps.deploy.outputs.rolled-back }}
+    steps:
+
+      - name: Validate inputs
+        id: inputs
+        shell: bash
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          MODE: ${{ inputs.mode }}
+          HEALTH_URL: ${{ inputs.health-url }}
+          ENVIRONMENT_URL: ${{ inputs.environment-url }}
+          WAIT_MINUTES: ${{ inputs.wait-minutes }}
+        run: |
+          set -euo pipefail
+          [[ "$MODE" =~ ^(deploy|placeholder|stop)$ ]] || { echo "::error::mode must be deploy, placeholder or stop"; exit 1; }
+          [[ "$HEALTH_URL" =~ ^(https?://[^/]+) ]] || { echo "::error::health-url must be an http(s) URL"; exit 1; }
+          echo "environment-url=${ENVIRONMENT_URL:-${BASH_REMATCH[1]}}" >> "$GITHUB_OUTPUT"
+          echo "wait-ms=$((WAIT_MINUTES * 60000))" >> "$GITHUB_OUTPUT"
+
+      - name: Record the deployment
+        id: record
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          REVISION: ${{ inputs.revision }}
+          MODE: ${{ inputs.mode }}
+        with:
+          script: |
+            const environment = process.env.ENVIRONMENT
+            const { data } = await github.rest.repos.createDeployment({
+              ...context.repo,
+              ref: process.env.REVISION,
+              environment,
+              auto_merge: false,
+              required_contexts: [],
+              production_environment: environment === 'production',
+              transient_environment: environment === 'preview',
+              description: `${process.env.MODE} via Dokploy`,
+            })
+            if (!data.id) throw new Error(`deployment not created: ${data.message ?? 'unknown reason'}`)
+            await github.rest.repos.createDeploymentStatus({
+              ...context.repo,
+              deployment_id: data.id,
+              state: 'in_progress',
+              log_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            })
+            core.setOutput('id', String(data.id))
+
+      - name: Deploy
+        id: deploy
+        uses: $/.github/actions/dokploy-deploy
+        with:
+          dokploy-url: ${{ inputs.dokploy-url }}
+          api-key: ${{ secrets.dokploy-api-key }}
+          application-id: ${{ inputs.application-id }}
+          project: ${{ inputs.project }}
+          environment: ${{ inputs.environment }}
+          image: ${{ inputs.image }}
+          revision: ${{ inputs.revision }}
+          health-url: ${{ inputs.health-url }}
+          description: ${{ inputs.description || format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}
+          backup-schedule-id: ${{ inputs.backup-schedule-id }}
+          initial-image: ${{ inputs.initial-image }}
+          skip-backup: ${{ inputs.skip-backup }}
+          require-backup: ${{ inputs.require-backup }}
+          rollback: ${{ inputs.rollback }}
+          timeout-ms: ${{ steps.inputs.outputs.wait-ms }}
+          mode: ${{ inputs.mode }}
+
+      - name: Report the result
+        if: always() && steps.record.outputs.id != ''
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          DEPLOYMENT_ID: ${{ steps.record.outputs.id }}
+          OUTCOME: ${{ steps.deploy.outcome }}
+          MODE: ${{ inputs.mode }}
+          ENVIRONMENT_URL: ${{ steps.inputs.outputs.environment-url }}
+        with:
+          script: |
+            const ok = process.env.OUTCOME === 'success'
+            await github.rest.repos.createDeploymentStatus({
+              ...context.repo,
+              deployment_id: Number(process.env.DEPLOYMENT_ID),
+              state: ok ? (process.env.MODE === 'stop' ? 'inactive' : 'success') : 'failure',
+              environment_url: process.env.ENVIRONMENT_URL,
+              log_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              auto_inactive: ok,
+            })
