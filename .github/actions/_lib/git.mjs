@@ -36,6 +36,8 @@ export function tokenGitInvocation(token, args, { env = process.env, serverUrl =
     [scoped, ''],
     [scoped, `AUTHORIZATION: basic ${basicAuth(token)}`],
   ]
+  // git reads GIT_CONFIG_PARAMETERS after GIT_CONFIG_COUNT, so inherited headers there would survive the resets
+  const { GIT_CONFIG_PARAMETERS: _, ...inherited } = env
   const start = Number.parseInt(env.GIT_CONFIG_COUNT ?? '', 10) || 0
   const config = Object.fromEntries(entries.flatMap(([key, value], index) => [
     [`GIT_CONFIG_KEY_${start + index}`, key],
@@ -43,7 +45,7 @@ export function tokenGitInvocation(token, args, { env = process.env, serverUrl =
   ]))
   return {
     args: ['-c', 'core.hooksPath=/dev/null', ...args],
-    env: { ...env, ...config, GIT_CONFIG_COUNT: String(start + entries.length), GIT_TERMINAL_PROMPT: '0' },
+    env: { ...inherited, ...config, GIT_CONFIG_COUNT: String(start + entries.length), GIT_TERMINAL_PROMPT: '0' },
   }
 }
 
