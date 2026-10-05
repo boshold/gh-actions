@@ -389,8 +389,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # Prisma base checks need the PR base / previous tip locally (no persisted credentials to fetch).
-          fetch-depth: ${{ inputs.prisma-check == '' && 1 || 0 }}
 
       # Started once; the image smoke test reuses them (host network).
       - name: Start services

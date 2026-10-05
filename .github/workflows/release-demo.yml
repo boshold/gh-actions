@@ -200,7 +200,7 @@ jobs:
       provenance: ${{ inputs.provenance }}
       latest: ${{ inputs.latest }}
       # The package release owns the GitHub "latest" flag; the SBOM is named after the -demo image.
-      make-latest: ${{ 'false' }}
+      make-latest: ${{ 'false' }} # zizmor: ignore[obfuscation] actionlint types a plain "false" as bool
       port: ${{ inputs.port }}
       health-path: ${{ inputs.health-path }}
       smoke-env: ${{ inputs.smoke-env }}

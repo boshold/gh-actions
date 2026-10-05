@@ -59,6 +59,17 @@ if [[ -z "$fail_unknown" ]]; then
   if at_least strict; then fail_unknown=true; else fail_unknown=false; fi
 fi
 
+# Checkouts without persisted credentials (private repos) need the token for the base fetch.
+git_auth() {
+  if [[ -n "${FETCH_TOKEN:-}" ]]; then
+    local header
+    header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 -w0)"
+    git -c "http.https://github.com/.extraheader=${header}" "$@"
+  else
+    git "$@"
+  fi
+}
+
 # --- Base resolution: which migrations are new in this change? ---------------
 base=""
 base_problem=""
@@ -68,7 +79,7 @@ if [[ -z "$BASE_REF" || "$BASE_REF" =~ ^0+$ ]]; then
   [[ -z "$base_problem" ]] && echo "::notice::no base ref (new branch or manual run); skipping checks that compare against the base"
 elif base="$(git rev-parse --verify --quiet "${BASE_REF}^{commit}" 2>/dev/null)"; then
   :
-elif git fetch --quiet --no-tags --depth=1 origin "$BASE_REF" 2>"$work/fetch.log"; then
+elif git_auth fetch --quiet --no-tags --depth=1 origin "$BASE_REF" 2>"$work/fetch.log"; then
   base="$(git rev-parse FETCH_HEAD)"
 else
   base=""

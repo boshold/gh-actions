@@ -43,6 +43,9 @@ inputs:
       Fail when the base cannot be determined (no base on a pull request, or the base ref cannot be
       fetched) instead of skipping the base checks. Empty is true at strict, false otherwise
     default: ""
+  token:
+    description: Token for fetching the base commit when the checkout kept no credentials
+    default: ${{ github.token }}
 
 outputs:
   drift:
@@ -67,4 +70,5 @@ runs:
         PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
         REQUIRE_TRANSACTION: ${{ inputs.require-transaction }}
         FAIL_ON_UNKNOWN_BASE: ${{ inputs.fail-on-unknown-base }}
+        FETCH_TOKEN: ${{ inputs.token }}
       run: bash "$GITHUB_ACTION_PATH/check.sh"
