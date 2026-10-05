@@ -20,6 +20,14 @@ image="${IMAGE:-ghcr.io/${GITHUB_REPOSITORY:?}}"
 image="${image,,}"
 [[ -n "${REVISION:-}" ]] || { echo "::error::revision is empty"; exit 1; }
 
+case "${PUSH_BY_DIGEST:-false}" in
+  true|false) by_digest="${PUSH_BY_DIGEST:-false}" ;;
+  *) echo "::error::invalid push-by-digest: ${PUSH_BY_DIGEST} (true, false)"; exit 1 ;;
+esac
+pushing="${PUSH:-false}"
+[[ "$by_digest" == true ]] && pushing=true
+out name "$image"
+
 refs=()
 while IFS= read -r tag; do
   tag="${tag//[[:space:]]/}"
@@ -27,8 +35,20 @@ while IFS= read -r tag; do
   if [[ "$tag" == */* || "$tag" == *:* ]]; then refs+=("$tag"); else refs+=("${image}:${tag}"); fi
 done <<< "${TAGS:-}"
 (( ${#refs[@]} )) || refs=("${image}:sha-${REVISION}")
-out image "${refs[0]}"
-out_multi refs "$(printf '%s\n' "${refs[@]}")"
+if [[ "$by_digest" == true ]]; then
+  tags_input="${TAGS:-}"
+  [[ -z "${tags_input//[[:space:]]/}" ]] || { echo "::error::push-by-digest creates no tags; tag the digest later (docker buildx imagetools create)"; exit 1; }
+  # Untagged push; image and refs become <image>@<digest> after the build
+  out push false
+  out tags ""
+  out outputs "type=image,name=${image},push-by-digest=true,name-canonical=true,push=true"
+else
+  out push "${PUSH:-false}"
+  out_multi tags "$(printf '%s\n' "${refs[@]}")"
+  out outputs ""
+  out image "${refs[0]}"
+  out_multi refs "$(printf '%s\n' "${refs[@]}")"
+fi
 
 args=()
 while IFS= read -r line; do
@@ -48,8 +68,9 @@ out_multi labels "$(printf '%s\n' "${labels[@]}")"
 
 load="${LOAD:-}"
 if [[ -z "$load" ]]; then
-  if [[ "${PUSH:-false}" == true ]]; then load=false; else load=true; fi
+  if [[ "$pushing" == true ]]; then load=false; else load=true; fi
 fi
+[[ "$by_digest" == true && "$load" == true ]] && { echo "::error::push-by-digest cannot load; pull <image>@<digest> instead"; exit 1; }
 out load "$load"
 
 scope="${CACHE_SCOPE:-$dockerfile}"
@@ -62,7 +83,7 @@ case "${PROVENANCE:-min}" in
   *) echo "::error::invalid provenance: ${PROVENANCE} (min, max, false)"; exit 1 ;;
 esac
 # Attestations need a registry push; the docker exporter (load) drops them anyway
-if [[ "${PUSH:-false}" == true ]]; then
+if [[ "$pushing" == true ]]; then
   out provenance "$provenance"
   out sbom "${SBOM:-false}"
 else

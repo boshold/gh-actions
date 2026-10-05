@@ -11,6 +11,9 @@ set -euo pipefail
 : "${GITHUB_STEP_SUMMARY:=/dev/null}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 helper() { node "$HERE/helper.mjs" "$@"; }
+# Lifecycle scripts (prepack, prepare, postpack) and their dependencies must not see a token
+clean_env=(env -u PUBLISH_TOKEN -u NODE_AUTH_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL
+  -u NPM_CONFIG_USERCONFIG -u GITHUB_TOKEN -u GH_TOKEN)
 
 case "$REGISTRY" in
   npmjs) registry_url=https://registry.npmjs.org/ ;;
@@ -31,7 +34,7 @@ if [[ -n "${NPM_VERSION:-}" ]]; then
   [[ "$NPM_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::npm-version must be X.Y.Z: ${NPM_VERSION}"; exit 1; }
   if helper lt "$(npm --version)" "$NPM_VERSION"; then
     echo "installing npm@${NPM_VERSION} (have $(npm --version))"
-    npm install --global --no-audit --no-fund "npm@${NPM_VERSION}" >/dev/null
+    "${clean_env[@]}" npm install --global --no-audit --no-fund "npm@${NPM_VERSION}" >/dev/null
   fi
 fi
 npm_version="$(npm --version)"
@@ -52,6 +55,33 @@ case "$PROVENANCE" in
   *) echo "::error::invalid provenance: ${PROVENANCE} (auto, true, false)"; exit 1 ;;
 esac
 
+# --- package list and pack (before any auth config, without credentials) ------
+mapfile -t entries < <(helper list "${PACKAGES:-}")
+(( ${#entries[@]} )) || { echo "::error::no package to publish; every workspace package is private"; exit 1; }
+
+out_dir="$(pwd)/.npm-publish"
+# Never wipe it when given tarballs, they may live there
+if ! printf '%s\n' "${entries[@]}" | grep -q '\.tgz$'; then rm -rf "$out_dir"; fi
+mkdir -p "$out_dir"
+
+tarballs=()
+i=0
+for entry in "${entries[@]}"; do
+  i=$((i + 1))
+  if [[ "$entry" == *.tgz ]]; then
+    [[ -f "$entry" ]] || { echo "::error::tarball not found: ${entry}"; exit 1; }
+    tarballs+=("$entry")
+    continue
+  fi
+  [[ -f "$entry/package.json" ]] || { echo "::error::no package.json in ${entry}"; exit 1; }
+  rm -rf "${out_dir:?}/$i" && mkdir -p "$out_dir/$i"
+  # pnpm pack resolves workspace: and catalog: ranges
+  (cd "$entry" && "${clean_env[@]}" pnpm pack --pack-destination "$out_dir/$i" >/dev/null)
+  tarball="$(find "$out_dir/$i" -maxdepth 1 -name '*.tgz' | head -n 1)"
+  [[ -n "$tarball" ]] || { echo "::error::pnpm pack produced no tarball in ${entry}"; exit 1; }
+  tarballs+=("$tarball")
+done
+
 # --- auth: own userconfig, token only in the npm process env -----------------
 npmrc="$(mktemp)"
 trap 'rm -f "$npmrc"' EXIT
@@ -62,32 +92,10 @@ if [[ -n "${PUBLISH_TOKEN:-}" ]]; then
 fi
 npm_() { NPM_CONFIG_USERCONFIG="$npmrc" NODE_AUTH_TOKEN="${PUBLISH_TOKEN:-}" npm "$@"; }
 
-# --- package list --------------------------------------------------------------
-mapfile -t entries < <(helper list "${PACKAGES:-}")
-(( ${#entries[@]} )) || { echo "::error::no package to publish; every workspace package is private"; exit 1; }
-
-out_dir="$(pwd)/.npm-publish"
-# Never wipe it when given tarballs, they may live there
-if ! printf '%s\n' "${entries[@]}" | grep -q '\.tgz$'; then rm -rf "$out_dir"; fi
-mkdir -p "$out_dir"
-
 published=()
 skipped=()
 rows=()
-i=0
-for entry in "${entries[@]}"; do
-  i=$((i + 1))
-  if [[ "$entry" == *.tgz ]]; then
-    [[ -f "$entry" ]] || { echo "::error::tarball not found: ${entry}"; exit 1; }
-    tarball="$entry"
-  else
-    [[ -f "$entry/package.json" ]] || { echo "::error::no package.json in ${entry}"; exit 1; }
-    rm -rf "${out_dir:?}/$i" && mkdir -p "$out_dir/$i"
-    # pnpm pack resolves workspace: and catalog: ranges
-    (cd "$entry" && pnpm pack --pack-destination "$out_dir/$i" >/dev/null)
-    tarball="$(find "$out_dir/$i" -maxdepth 1 -name '*.tgz' | head -n 1)"
-    [[ -n "$tarball" ]] || { echo "::error::pnpm pack produced no tarball in ${entry}"; exit 1; }
-  fi
+for tarball in "${tarballs[@]}"; do
   read -r name version private publish_registry < <(tar -xzOf "$tarball" package/package.json | helper manifest) || true
   [[ -n "${name:-}" && -n "${version:-}" ]] || { echo "::error::cannot read package.json from ${tarball}"; exit 1; }
   [[ "$private" == true ]] && { echo "::error::${name} is private and cannot be published"; exit 1; }
@@ -109,7 +117,7 @@ for entry in "${entries[@]}"; do
   fi
 
   tag="${DIST_TAG:-$(helper dist-tag "$version")}"
-  args=("./${tarball#./}" --registry "$registry_url" --tag "$tag" "--provenance=${provenance}")
+  args=("./${tarball#./}" --registry "$registry_url" --tag "$tag" "--provenance=${provenance}" --ignore-scripts)
   [[ "$tarball" == /* ]] && args[0]="$tarball"
   [[ "$REGISTRY" == npmjs ]] && args+=(--access "$ACCESS")
 

@@ -106,6 +106,7 @@ if [[ -n "$base" ]]; then
     esac
   done < "$work/changes"
 fi
+mapfile -t all_migrations < <(find "$MIGRATIONS" -mindepth 2 -maxdepth 2 -name migration.sql | sort)
 
 # Identifier, optionally schema-qualified: "public"."user" | public.user | "user" | user
 ident='"?[A-Za-z0-9_]+"?'
@@ -127,11 +128,19 @@ destructive_reasons() {
   grep -qiE 'RENAME[[:space:]]+COLUMN' <<< "$sql" && echo "RENAME COLUMN"
   grep -qiE 'DROP[[:space:]]+SCHEMA' <<< "$sql" && echo "DROP SCHEMA"
   grep -qiE 'DROP[[:space:]]+TYPE' <<< "$sql" && echo "DROP TYPE"
-  # DROP TABLE, except SQLite rebuilds (DROP TABLE "x" followed by RENAME "new_x" TO "x")
+  # DROP TABLE, except SQLite rebuilds (RENAME "new_x" TO "x") that provably copy every column
+  local rebuilt="" rebuilt_done=false
   while read -r name; do
     [[ -n "$name" ]] || continue
-    grep -qiE "\"?new_${name}\"?[[:space:]]+RENAME[[:space:]]+TO[[:space:]]+(${ident}[.])?\"?${name}\"?([^A-Za-z0-9_]|$)" <<< "$sql" \
-      || echo "DROP TABLE ${name}"
+    if ! grep -qiE "\"?new_${name}\"?[[:space:]]+RENAME[[:space:]]+TO[[:space:]]+(${ident}[.])?\"?${name}\"?([^A-Za-z0-9_]|$)" <<< "$sql"; then
+      echo "DROP TABLE ${name}"
+      continue
+    fi
+    if [[ "$rebuilt_done" == false ]]; then
+      rebuilt="$(node --no-warnings "$HERE/sqlite-columns.mjs" "$file" "${all_migrations[@]}" || true)"
+      rebuilt_done=true
+    fi
+    grep -qixF -- "$name" <<< "$rebuilt" || echo "DROP TABLE ${name} (rebuild loses columns or unverifiable)"
   done < <(grep -oiE "DROP[[:space:]]+TABLE[[:space:]]+(IF[[:space:]]+EXISTS[[:space:]]+)?${qualified}" <<< "$sql" | last_name)
   # Table rename, except the SQLite rebuild's "new_x" -> "x"
   while read -r from to; do

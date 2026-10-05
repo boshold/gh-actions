@@ -69,6 +69,7 @@ jobs:
     permissions:
       contents: read
       deployments: write
+      pull-requests: read
     with:
       environment: preview
       project: my-app
@@ -77,6 +78,9 @@ jobs:
       health-url: https://preview.example.com/api/health
       application-id: ${{ vars.DOKPLOY_APPLICATION_ID_PREVIEW }}
       dokploy-url: ${{ vars.DOKPLOY_URL }}
+      # Re-checks slot ownership right before Dokploy changes (the slot may move during CI).
+      preview-pr: ${{ github.event.pull_request.number }}
+      preview-head-sha: ${{ github.event.pull_request.head.sha }}
     secrets:
       dokploy-api-key: ${{ secrets.DOKPLOY_API_KEY_PREVIEW }}
 
@@ -90,6 +94,7 @@ jobs:
     permissions:
       contents: read
       deployments: write
+      pull-requests: read
     with:
       mode: placeholder
       environment: preview
@@ -100,5 +105,6 @@ jobs:
       health-url: https://preview.example.com/api/health
       application-id: ${{ vars.DOKPLOY_APPLICATION_ID_PREVIEW }}
       dokploy-url: ${{ vars.DOKPLOY_URL }}
+      preview-pr: ${{ github.event.pull_request.number }}
     secrets:
       dokploy-api-key: ${{ secrets.DOKPLOY_API_KEY_PREVIEW }}

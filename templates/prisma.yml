@@ -1,11 +1,11 @@
 name: Prisma
 
 # Migration checks only when the schema or migrations change. Label a PR "migration:destructive"
-# to accept destructive SQL at level strict.
+# to accept destructive SQL at level strict; removing the label re-runs the check.
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
     paths:
       - prisma/**
       - prisma.config.ts
@@ -29,7 +29,9 @@ permissions:
 
 jobs:
   prisma:
-    if: github.event.action != 'labeled' || github.event.label.name == 'migration:destructive'
+    if: >-
+      (github.event.action != 'labeled' && github.event.action != 'unlabeled')
+      || github.event.label.name == 'migration:destructive'
     uses: boshold/gh-actions-public/.github/workflows/prisma-check.yml@v1
     with:
       level: strict

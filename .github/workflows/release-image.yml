@@ -1,10 +1,11 @@
 name: Release image
 
-# Reusable release of a container image: bump the version, build the image from the release commit,
-# boot it and prove the revision, scan it, push it under sha-<sha> only, push the release commit and
-# tag, create the GitHub release (+ SBOM), then add the version tags (latest only for the highest
-# stable version). Nothing reaches the registry before smoke and scan passed, and no version tag
-# exists before the git tag does.
+# Reusable release of a container image: bump the version, build the image from the release commit and
+# push it untagged by digest, pull that digest, boot it and prove the revision, scan it, tag it
+# sha-<sha>, push the release commit and tag, create the GitHub release (+ SBOM), then add the version
+# tags (latest only for the highest stable version). The tested digest is the published one; no tag
+# exists before smoke and scan passed, and no version tag before the git tag does. Failed runs leave
+# untagged versions behind (see README, GHCR cleanup policy).
 # Callers run their CI (stage: release) first and grant contents: write and packages: write.
 # Every step after the push is idempotent: a failed run is fixed by re-running it. A resumed run
 # reuses an already pushed sha-<sha> image (smoke and scan still run against it).
@@ -156,8 +157,8 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
       sha: ${{ steps.version.outputs.sha }}
       prerelease: ${{ steps.version.outputs.prerelease }}
-      digest: ${{ steps.existing.outputs.digest || steps.push.outputs.digest }}
-      image: ${{ (steps.existing.outputs.digest || steps.push.outputs.digest) && format('{0}@{1}', steps.name.outputs.image, steps.existing.outputs.digest || steps.push.outputs.digest) || '' }}
+      digest: ${{ steps.existing.outputs.digest || steps.sha-tag.outputs.digest }}
+      image: ${{ (steps.existing.outputs.digest || steps.sha-tag.outputs.digest) && format('{0}@{1}', steps.name.outputs.image, steps.existing.outputs.digest || steps.sha-tag.outputs.digest) || '' }}
     steps:
 
       - name: Require the release branch
@@ -214,7 +215,7 @@ jobs:
           password: ${{ secrets.registry-password || github.token }}
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-        if: ${{ !inputs.dry-run && steps.version.outputs.resumed == 'true' }}
+        if: ${{ !inputs.dry-run }}
 
       # A resumed release whose sha tag is already pushed reuses those bytes instead of rebuilding.
       - id: existing
@@ -237,6 +238,7 @@ jobs:
           echo "image=$IMAGE@$digest" >> "$GITHUB_OUTPUT"
           echo "reusing $IMAGE@$digest"
 
+      # Pushed untagged by digest (dry run: loaded only); every check below runs on these bytes.
       - id: build
         name: Build image
         if: steps.existing.outputs.digest == ''
@@ -247,13 +249,23 @@ jobs:
           image: ${{ steps.name.outputs.image }}
           tags: sha-${{ steps.version.outputs.sha }}
           build-args: ${{ inputs.build-args }}
+          platforms: ${{ !inputs.dry-run && inputs.platforms || '' }}
           registry: ${{ inputs.registry }}
           registry-password: ${{ secrets.registry-password || github.token }}
           secret-token: ${{ secrets.packages-token || github.token }}
           revision: ${{ steps.version.outputs.sha }}
           version: ${{ steps.version.outputs.version }}
+          provenance: ${{ inputs.provenance }}
           push: "false"
-          load: "true"
+          push-by-digest: ${{ !inputs.dry-run }}
+          load: ${{ inputs.dry-run }}
+
+      - name: Pull the pushed digest
+        if: ${{ !inputs.dry-run && steps.existing.outputs.digest == '' }}
+        shell: bash
+        env:
+          IMAGE: ${{ steps.build.outputs.image }}
+        run: docker pull "$IMAGE"
 
       - name: Boot the image and prove the revision
         uses: $/.github/actions/image-smoke
@@ -288,25 +300,21 @@ jobs:
           output: ${{ runner.temp }}/${{ steps.name.outputs.sbom }}
           exit-code: "0"
 
-      # Only the immutable sha tag; version tags follow the git tag below.
-      - id: push
-        name: Push image
+      # Only the immutable sha tag on the tested digest; version tags follow the git tag below.
+      - id: sha-tag
+        name: Tag the image sha-<sha>
         if: ${{ !inputs.dry-run && steps.existing.outputs.digest == '' }}
-        uses: $/.github/actions/image-build
-        with:
-          context: ${{ inputs.context }}
-          dockerfile: ${{ inputs.dockerfile }}
-          image: ${{ steps.name.outputs.image }}
-          tags: sha-${{ steps.version.outputs.sha }}
-          build-args: ${{ inputs.build-args }}
-          platforms: ${{ inputs.platforms }}
-          registry: ${{ inputs.registry }}
-          registry-password: ${{ secrets.registry-password || github.token }}
-          secret-token: ${{ secrets.packages-token || github.token }}
-          revision: ${{ steps.version.outputs.sha }}
-          version: ${{ steps.version.outputs.version }}
-          provenance: ${{ inputs.provenance }}
-          push: "true"
+        shell: bash
+        env:
+          IMAGE: ${{ steps.build.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          NAME: ${{ steps.name.outputs.image }}
+          SHA: ${{ steps.version.outputs.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE" == "$NAME@$DIGEST" ]] || { echo "::error::unexpected image ref $IMAGE (expected $NAME@$DIGEST)"; exit 1; }
+          docker buildx imagetools create --tag "$NAME:sha-$SHA" "$IMAGE"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
 
       - name: Push the release commit and tag, create the release
         uses: $/.github/actions/release-publish
@@ -326,7 +334,7 @@ jobs:
         shell: bash
         env:
           IMAGE: ${{ steps.name.outputs.image }}
-          DIGEST: ${{ steps.existing.outputs.digest || steps.push.outputs.digest }}
+          DIGEST: ${{ steps.existing.outputs.digest || steps.sha-tag.outputs.digest }}
           TAG: ${{ steps.version.outputs.tag }}
           VERSION: ${{ steps.version.outputs.version }}
           PRERELEASE: ${{ steps.version.outputs.prerelease }}

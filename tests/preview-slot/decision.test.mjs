@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { decidePreview } from '../../.github/actions/preview-slot/decision.mjs'
+import { checkOwner, decidePreview } from '../../.github/actions/preview-slot/decision.mjs'
 
 const repository = 'owner/example'
 const owner = (number, labels = ['preview'], headRepository = repository) => ({ number, labels, headRepository })
@@ -53,4 +53,27 @@ test('a released slot restores the placeholder only when no owner remains', asyn
   assert.deepEqual(await decidePreview(event('', { eventName: 'workflow_dispatch' }), async () => [owner(4, ['preview'], 'fork/x')], noRemove), {
     deploy: false, placeholder: true,
   })
+})
+
+const sha = 'a'.repeat(40)
+const pull = (overrides = {}) => ({ number: 2, state: 'open', labels: ['preview'], headRepository: repository, headSha: sha, ...overrides })
+const check = (pullRequest, open, mode = 'check') =>
+  checkOwner({ mode, label: 'preview', repository, prNumber: 2, headSha: sha }, pullRequest, open).owner
+
+test('check passes only for the single current same-repo owner at the built sha', () => {
+  assert.equal(check(pull(), [owner(2), owner(5, ['other'])]), true)
+  assert.equal(check(pull(), [owner(2), owner(3, ['preview'], 'fork/x')]), true)
+  assert.equal(check(null, [owner(2)]), false)
+  assert.equal(check(pull({ state: 'closed' }), []), false)
+  assert.equal(check(pull({ headRepository: 'fork/example' }), [owner(2, ['preview'], 'fork/example')]), false)
+  assert.equal(check(pull({ labels: [] }), [owner(3)]), false)
+  assert.equal(check(pull(), [owner(2), owner(3)]), false)
+  assert.equal(check(pull(), [owner(3)]), false)
+  assert.equal(check(pull({ headSha: 'b'.repeat(40) }), [owner(2)]), false)
+})
+
+test('check-idle passes only when no open same-repo PR has the label', () => {
+  assert.equal(check(null, [], 'check-idle'), true)
+  assert.equal(check(null, [owner(4, ['preview'], 'fork/x'), owner(5, ['other'])], 'check-idle'), true)
+  assert.equal(check(null, [owner(4)], 'check-idle'), false)
 })

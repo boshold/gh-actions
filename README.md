@@ -85,7 +85,7 @@ What keeps the fast stage fast:
 | `release-image.yml` | Version, build image, smoke, scan, push, tag `vX.Y.Z`/`X.Y.Z`/`latest`, release with SBOM. |
 | `release-tag.yml` | Version, tag and GitHub release only. Optional assets with SHA256SUMS. |
 | `release-demo.yml` | Demo image of a module's playground, deployed to Dokploy and stopped again. |
-| `deploy-dokploy.yml` | Deploy an image to Dokploy with a GitHub deployment record, backup gate, health check and rollback. |
+| `deploy-dokploy.yml` | Deploy an image to Dokploy with a GitHub deployment record, backup gate, health check and rollback. With `preview-pr`, re-checks preview slot ownership under the deploy lock and skips stale runs. |
 | `preview-placeholder.yml` | Builds the "no preview deployed" placeholder image. |
 
 ## Actions
@@ -126,7 +126,8 @@ Details:
 - A failed release can be re-run. If the release commit is already tagged, the run continues with the same version instead of bumping again.
 - Only the default branch can release. `dry-run: true` works from any branch and pushes nothing.
 - The push uses `github.token` unless a `release-token` secret is passed. Use a GitHub App token when the default branch is protected. Pushes made with `github.token` do not start other workflows.
-- Images are pushed only after the smoke test and scan pass. `latest` only moves for the highest stable version.
+- Images are built once and pushed untagged by digest. Smoke test, scan and SBOM run on that pulled digest, and tags are added to it only after they pass, so the published bytes are the tested ones. `latest` only moves for the highest stable version.
+- The same applies to `nuxt-ci.yml` with `image-push: true`: `verify` pushes and tests the digest, `image-push` tags it once every job is green. Failed runs leave untagged versions in GHCR. Set a cleanup policy for untagged versions on the package (for example [actions/delete-package-versions](https://github.com/actions/delete-package-versions) with `delete-only-untagged-versions: true` on a schedule).
 - npmjs.com: trusted publishing is bound to the caller's workflow file, so publishing runs in the caller's job with the `npm-publish` action. See `templates/ts-lib-npmjs/release.yml`.
 
 ## Contracts

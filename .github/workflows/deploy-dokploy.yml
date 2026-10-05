@@ -7,6 +7,7 @@ name: Deploy to Dokploy
 # The job declares no `environment:`, so GitHub environment protection rules (reviewers, branch
 # limits) do not apply here; the caller passes the Dokploy secret. Gate production in the caller,
 # e.g. with an environment on a job this one needs.
+# With preview-pr set, callers also grant pull-requests: read.
 
 on:
   workflow_call:
@@ -69,6 +70,20 @@ on:
         type: string
         default: ""
         description: Dokploy deployment description; empty is the run URL
+      preview-pr:
+        type: string
+        default: ""
+        description: >-
+          Preview slot pull request number. When set, the job first checks (under the Dokploy lock) that
+          this PR still owns the slot, or for placeholder mode that no PR does, and skips otherwise
+      preview-head-sha:
+        type: string
+        default: ""
+        description: Head sha the preview PR must still have (deploy mode)
+      preview-label:
+        type: string
+        default: preview
+        description: Label that owns the preview slot
       wait-minutes:
         type: number
         default: 10
@@ -109,15 +124,48 @@ jobs:
           HEALTH_URL: ${{ inputs.health-url }}
           ENVIRONMENT_URL: ${{ inputs.environment-url }}
           WAIT_MINUTES: ${{ inputs.wait-minutes }}
+          PREVIEW_PR: ${{ inputs.preview-pr }}
+          PREVIEW_HEAD_SHA: ${{ inputs.preview-head-sha }}
         run: |
           set -euo pipefail
           [[ "$MODE" =~ ^(deploy|placeholder|stop)$ ]] || { echo "::error::mode must be deploy, placeholder or stop"; exit 1; }
+          if [[ -n "$PREVIEW_PR" ]]; then
+            [[ "$PREVIEW_PR" =~ ^[1-9][0-9]*$ ]] || { echo "::error::preview-pr must be a pull request number"; exit 1; }
+            [[ "$MODE" == placeholder || "$PREVIEW_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] \
+              || { echo "::error::preview-head-sha must be a full commit sha"; exit 1; }
+          fi
           [[ "$HEALTH_URL" =~ ^(https?://[^/]+) ]] || { echo "::error::health-url must be an http(s) URL"; exit 1; }
           echo "environment-url=${ENVIRONMENT_URL:-${BASH_REMATCH[1]}}" >> "$GITHUB_OUTPUT"
           echo "wait-ms=$((WAIT_MINUTES * 60000))" >> "$GITHUB_OUTPUT"
 
+      # Re-checked under the Dokploy lock: the slot may have moved while this run built its image.
+      - name: Check the preview slot
+        id: slot
+        if: inputs.preview-pr != ''
+        uses: $/.github/actions/preview-slot
+        with:
+          mode: ${{ inputs.mode == 'placeholder' && 'check-idle' || 'check' }}
+          pr: ${{ inputs.preview-pr }}
+          head-sha: ${{ inputs.preview-head-sha }}
+          label: ${{ inputs.preview-label }}
+          token: ${{ github.token }}
+
+      - name: Skip a stale preview
+        if: steps.slot.outputs.owner == 'false'
+        shell: bash
+        env:
+          MODE: ${{ inputs.mode }}
+          PREVIEW_PR: ${{ inputs.preview-pr }}
+        run: |
+          if [[ "$MODE" == placeholder ]]; then
+            echo "::notice::A pull request owns the preview slot again; placeholder not restored"
+          else
+            echo "::notice::PR #$PREVIEW_PR no longer owns the preview slot at this head; deploy skipped"
+          fi
+
       - name: Record the deployment
         id: record
+        if: steps.slot.outputs.owner != 'false'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           ENVIRONMENT: ${{ inputs.environment }}
@@ -147,6 +195,7 @@ jobs:
 
       - name: Deploy
         id: deploy
+        if: steps.slot.outputs.owner != 'false'
         uses: $/.github/actions/dokploy-deploy
         with:
           dokploy-url: ${{ inputs.dokploy-url }}

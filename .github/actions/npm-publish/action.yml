@@ -4,6 +4,9 @@ description: >-
   Runs in the caller's job, so an npm trusted publisher bound to the caller's workflow file works.
   Versions already on the registry are skipped, so a failed release can be re-run.
   Needs Node (and pnpm for package directories); OIDC needs permissions id-token: write.
+  Package directories are packed without credentials in the environment and tarballs are published
+  with --ignore-scripts, but build tools still run in a job holding the token. Prefer building
+  tarballs in a job without credentials, uploading them as an artifact, and passing the .tgz paths here.
 
 inputs:
   packages:

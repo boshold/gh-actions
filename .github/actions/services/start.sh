@@ -6,7 +6,10 @@ set -euo pipefail
 : "${POSTGRES_MODE:=container}"
 : "${GITHUB_OUTPUT:=/dev/stdout}"
 : "${GITHUB_PATH:=/dev/null}"
+: "${GITHUB_STATE:=/dev/null}"
 out() { printf '%s=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"; }
+# Recorded before start so the post step also cleans up after failures
+state() { printf '%s=%s\n' "$1" "$2" >> "$GITHUB_STATE"; }
 
 [[ "$WAIT_SECONDS" =~ ^[0-9]+$ ]] || { echo "::error::wait-seconds must be a number: ${WAIT_SECONDS}"; exit 1; }
 
@@ -45,6 +48,7 @@ if [[ -n "${POSTGRES_VERSION:-}" ]]; then
   case "$POSTGRES_MODE" in
     container)
       pg="ci-postgres-${suffix}"
+      state postgres_container "$pg"
       docker rm --force --volumes "$pg" >/dev/null 2>&1 || true
       docker run -d --name "$pg" \
         -p "${POSTGRES_PORT}:5432" \
@@ -93,6 +97,7 @@ fi
 
 if [[ -n "${MAILPIT_VERSION:-}" ]]; then
   mp="ci-mailpit-${suffix}"
+  state mailpit_container "$mp"
   docker rm --force --volumes "$mp" >/dev/null 2>&1 || true
   docker run -d --name "$mp" \
     -p "${MAILPIT_SMTP_PORT}:1025" \
@@ -105,6 +110,8 @@ fi
 if [[ -n "${COMPOSE_FILE_INPUT:-}" ]]; then
   [[ -f "$COMPOSE_FILE_INPUT" ]] || { echo "::error::compose file not found: ${COMPOSE_FILE_INPUT}"; exit 1; }
   project="ci-${suffix}"
+  state compose_project "$project"
+  state compose_file "$(realpath "$COMPOSE_FILE_INPUT")"
   docker compose -p "$project" -f "$COMPOSE_FILE_INPUT" down --volumes --remove-orphans >/dev/null 2>&1 || true
   if ! docker compose -p "$project" -f "$COMPOSE_FILE_INPUT" up -d --wait --wait-timeout "$WAIT_SECONDS"; then
     echo "::error::compose services not healthy after ${WAIT_SECONDS}s"

@@ -1,5 +1,5 @@
 name: Services
-description: Starts Postgres (container or PGDG binaries), Mailpit and/or a compose file and waits until healthy.
+description: Starts Postgres (container or PGDG binaries), Mailpit and/or a compose file, waits until healthy and removes them when the job ends.
 
 inputs:
   postgres-version:
@@ -40,31 +40,16 @@ inputs:
 outputs:
   database-url:
     description: postgresql:// URL of postgres-db (container mode only)
-    value: ${{ steps.start.outputs.database-url }}
   postgres-container:
-    value: ${{ steps.start.outputs.postgres-container }}
+    description: Started Postgres container name
   mailpit-container:
-    value: ${{ steps.start.outputs.mailpit-container }}
+    description: Started Mailpit container name
   compose-project:
-    value: ${{ steps.start.outputs.compose-project }}
+    description: Started compose project name
 
+# post removes the started containers and compose project, also after failures
 runs:
-  using: composite
-  steps:
-    - id: start
-      shell: bash
-      env:
-        POSTGRES_VERSION: ${{ inputs.postgres-version }}
-        POSTGRES_MODE: ${{ inputs.postgres-mode }}
-        POSTGRES_USER: ${{ inputs.postgres-user }}
-        POSTGRES_PASSWORD: ${{ inputs.postgres-password }}
-        POSTGRES_DB: ${{ inputs.postgres-db }}
-        POSTGRES_PORT: ${{ inputs.postgres-port }}
-        POSTGRES_EXTRA_DATABASES: ${{ inputs.postgres-extra-databases }}
-        MAILPIT_VERSION: ${{ inputs.mailpit-version }}
-        MAILPIT_SMTP_PORT: ${{ inputs.mailpit-smtp-port }}
-        MAILPIT_HTTP_PORT: ${{ inputs.mailpit-http-port }}
-        COMPOSE_FILE_INPUT: ${{ inputs.compose-file }}
-        WAIT_SECONDS: ${{ inputs.wait-seconds }}
-        NAME_SUFFIX: ${{ inputs.name-suffix }}
-      run: bash "$GITHUB_ACTION_PATH/start.sh"
+  using: node24
+  main: index.mjs
+  post: post.mjs
+  post-if: always()

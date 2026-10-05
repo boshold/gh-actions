@@ -177,14 +177,21 @@ jobs:
           (( i > 0 )) || { echo "::error::no package to publish; every workspace package is private"; exit 1; }
           cat "$OUT/order.txt"
 
-      # The release commit and tag, for the publish job (only HEAD's new commit; its parent is on the remote).
+      # The release commit and tag for the publish job: only the commits after GITHUB_SHA (on the remote),
+      # or the full history when the tag sits on GITHUB_SHA itself (no version commit, maybe a root commit).
       - name: Bundle the release commit
         if: steps.version.outputs.resumed != 'true'
         shell: bash
         env:
           TAG: ${{ steps.version.outputs.tag }}
           OUT: ${{ runner.temp }}/npm-release
-        run: git bundle create "$OUT/release.bundle" "refs/tags/$TAG" "^HEAD~1"
+        run: |
+          set -euo pipefail
+          if [[ "$(git rev-parse "refs/tags/$TAG^{commit}")" != "$(git rev-parse "$GITHUB_SHA^{commit}")" ]]; then
+            git bundle create "$OUT/release.bundle" "refs/tags/$TAG" "^$GITHUB_SHA"
+          else
+            git bundle create "$OUT/release.bundle" "refs/tags/$TAG"
+          fi
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

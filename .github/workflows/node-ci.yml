@@ -194,23 +194,16 @@ on:
 
 env:
   NUXT_TELEMETRY_DISABLED: "1"
-  PREPARE_CMD: ${{ inputs.prepare-command == 'auto' && (inputs.preset == 'nuxt-module' && 'pnpm dev:prepare' || '') || inputs.prepare-command }}
-  BUILD_CMD: ${{ inputs.build-command == 'auto' && (inputs.preset == 'nuxt-module' && 'pnpm prepack' || 'pnpm build') || inputs.build-command }}
-  PLAYGROUND_BUILD_CMD: ${{ inputs.playground-build-command == 'auto' && (inputs.preset == 'nuxt-module' && 'pnpm dev:build' || '') || inputs.playground-build-command }}
 
 jobs:
-  check:
-    name: ${{ matrix.part == 'all' && 'check' || matrix.part }}
-    strategy:
-      fail-fast: false
-      matrix:
-        part: ${{ fromJSON(inputs.parallel && '["lint","typecheck","test"]' || '["all"]') }}
+  # Validates inputs and maps auto commands per preset; an explicit empty command disables the step.
+  resolve:
     runs-on: ${{ inputs.runner-light || (github.event.repository.private && vars.CI_RUNNER_LIGHT) || 'ubuntu-latest' }}
-    timeout-minutes: ${{ inputs.check-timeout-minutes }}
-    env:
-      CI_FULL: ${{ inputs.stage != 'fast' }}
-      # The test part also builds and runs the full-stage suites.
-      PART_TEST: ${{ matrix.part == 'all' || matrix.part == 'test' }}
+    timeout-minutes: 5
+    outputs:
+      prepare: ${{ steps.cmd.outputs.prepare }}
+      build: ${{ steps.cmd.outputs.build }}
+      playground-build: ${{ steps.cmd.outputs.playground-build }}
     steps:
       - name: Validate inputs
         shell: bash
@@ -226,6 +219,53 @@ jobs:
           [[ "$PRESET" =~ ^(|nuxt-module)$ ]] || { echo "::error::preset must be empty or nuxt-module, got '$PRESET'"; exit 1; }
           [[ "$MATRIX_STAGE" =~ ^(full|release)$ ]] || { echo "::error::matrix-stage must be full or release, got '$MATRIX_STAGE'"; exit 1; }
 
+      - name: Resolve commands
+        id: cmd
+        shell: bash
+        env:
+          PRESET: ${{ inputs.preset }}
+          PREPARE: ${{ inputs.prepare-command }}
+          BUILD: ${{ inputs.build-command }}
+          PLAYGROUND_BUILD: ${{ inputs.playground-build-command }}
+        run: |
+          set -euo pipefail
+          if [[ "$PRESET" == nuxt-module ]]; then
+            defaults=("pnpm dev:prepare" "pnpm prepack" "pnpm dev:build")
+          else
+            defaults=("" "pnpm build" "")
+          fi
+          emit() {
+            local value="$2" delim
+            [[ "$value" == auto ]] && value="$3"
+            if [[ "$value" == *$'\n'* ]]; then
+              delim="EOF_$(od -An -N8 -tx1 /dev/urandom | tr -d " \n")"
+              printf '%s<<%s\n%s\n%s\n' "$1" "$delim" "$value" "$delim" >> "$GITHUB_OUTPUT"
+            else
+              printf '%s=%s\n' "$1" "$value" >> "$GITHUB_OUTPUT"
+            fi
+            echo "$1: ${value:-(disabled)}"
+          }
+          emit prepare "$PREPARE" "${defaults[0]}"
+          emit build "$BUILD" "${defaults[1]}"
+          emit playground-build "$PLAYGROUND_BUILD" "${defaults[2]}"
+
+  check:
+    needs: resolve
+    name: ${{ matrix.part == 'all' && 'check' || matrix.part }}
+    strategy:
+      fail-fast: false
+      matrix:
+        part: ${{ fromJSON(inputs.parallel && '["lint","typecheck","test"]' || '["all"]') }}
+    runs-on: ${{ inputs.runner-light || (github.event.repository.private && vars.CI_RUNNER_LIGHT) || 'ubuntu-latest' }}
+    timeout-minutes: ${{ inputs.check-timeout-minutes }}
+    env:
+      PREPARE_CMD: ${{ needs.resolve.outputs.prepare }}
+      BUILD_CMD: ${{ needs.resolve.outputs.build }}
+      PLAYGROUND_BUILD_CMD: ${{ needs.resolve.outputs.playground-build }}
+      CI_FULL: ${{ inputs.stage != 'fast' }}
+      # The test part also builds and runs the full-stage suites.
+      PART_TEST: ${{ matrix.part == 'all' || matrix.part == 'test' }}
+    steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -398,6 +438,7 @@ jobs:
           retention-days: 7
 
   matrix:
+    needs: resolve
     name: node ${{ matrix.node }} (${{ matrix.os }})
     if: inputs.node-versions != '' && (inputs.stage == 'release' || (inputs.stage == 'full' && inputs.matrix-stage == 'full'))
     strategy:
@@ -413,6 +454,9 @@ jobs:
         (inputs.runner-standard || (github.event.repository.private && vars.CI_RUNNER_STANDARD) || 'ubuntu-latest')
       }}
     timeout-minutes: ${{ inputs.matrix-timeout-minutes }}
+    env:
+      PREPARE_CMD: ${{ needs.resolve.outputs.prepare }}
+      BUILD_CMD: ${{ needs.resolve.outputs.build }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -476,11 +520,12 @@ jobs:
 
   # Inherits the caller's grant; a permissions block here would fail callers that grant less.
   extra: # zizmor: ignore[excessive-permissions]
+    needs: resolve
     if: inputs.extra-tests != ''
     uses: $/.github/workflows/extra-tests.yml
     with:
       tests: ${{ inputs.extra-tests }}
-      prepare-command: ${{ inputs.prepare-command == 'auto' && (inputs.preset == 'nuxt-module' && 'pnpm dev:prepare' || '') || inputs.prepare-command }}
+      prepare-command: ${{ needs.resolve.outputs.prepare }}
       stage: ${{ inputs.stage }}
       runner-light: ${{ inputs.runner-light }}
       runner-standard: ${{ inputs.runner-standard }}

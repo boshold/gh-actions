@@ -181,7 +181,9 @@ on:
       image-push:
         type: boolean
         default: false
-        description: Push (image-push job) after every other job passed; never for fork pull requests. The push rebuilds from the build cache; a cache miss can produce different bytes than the smoke-tested image (logged as a warning)
+        description: >-
+          verify pushes the image untagged by digest and smoke-tests that exact digest; the image-push job
+          tags it after every other job passed. Never for fork pull requests (they build and load only)
       image:
         type: string
         default: ""
@@ -203,7 +205,7 @@ on:
       image-platforms:
         type: string
         default: ""
-        description: Platforms for the push, e.g. linux/amd64,linux/arm64; the smoke test uses the runner platform
+        description: Platforms for the pushed image, e.g. linux/amd64,linux/arm64; the smoke test pulls the runner platform
       image-registry:
         type: string
         default: ghcr.io
@@ -382,9 +384,13 @@ jobs:
     env:
       # false in the fast stage: only the image is built and booted.
       CI_FULL: ${{ inputs.stage != 'fast' }}
+      # Same-repo with image-push: push once by digest and test exactly those bytes.
+      BY_DIGEST: >-
+        ${{ inputs.image-build && inputs.image-push
+        && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     outputs:
-      image-id: ${{ steps.tested.outputs.id }}
-      image-arch: ${{ steps.tested.outputs.arch }}
+      image: ${{ env.BY_DIGEST == 'true' && steps.image.outputs.image || '' }}
+      digest: ${{ env.BY_DIGEST == 'true' && steps.image.outputs.digest || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -522,8 +528,18 @@ jobs:
           registry-password: ${{ secrets.registry-password || github.token }}
           secret-token: ${{ secrets.packages-token || github.token }}
           revision: ${{ github.sha }}
+          platforms: ${{ env.BY_DIGEST == 'true' && inputs.image-platforms || '' }}
+          provenance: ${{ inputs.image-provenance }}
           push: "false"
-          load: "true"
+          push-by-digest: ${{ env.BY_DIGEST }}
+          load: ${{ env.BY_DIGEST != 'true' }}
+
+      - name: Pull the pushed digest
+        if: env.BY_DIGEST == 'true'
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+        run: docker pull "$IMAGE"
 
       - name: Boot the image and prove the revision
         if: inputs.image-build
@@ -538,18 +554,6 @@ jobs:
           run-args: ${{ inputs.image-run-args }}
           smoke-command: ${{ inputs.image-smoke-command }}
           memory: ${{ inputs.image-memory }}
-
-      # The image-push job compares the pushed image with this one.
-      - name: Record the tested image
-        id: tested
-        if: inputs.image-build
-        shell: bash
-        env:
-          IMAGE: ${{ steps.image.outputs.image }}
-        run: |
-          set -euo pipefail
-          echo "id=$(docker image inspect --format '{{.Id}}' "$IMAGE")" >> "$GITHUB_OUTPUT"
-          echo "arch=$(docker image inspect --format '{{.Architecture}}' "$IMAGE")" >> "$GITHUB_OUTPUT"
 
       - name: Supply chain
         if: env.CI_FULL == 'true' && inputs.supply-chain
@@ -567,71 +571,45 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  # Pushes only after every other job is green. Rebuilds from the gha cache (same inputs as the
-  # smoke build) and checks the pushed image config matches the one verify booted.
+  # Tags the digest verify pushed and smoke-tested, only after every other job is green. No rebuild.
   image-push:
     needs: [check, verify, extra]
     if: >-
-      !cancelled() && needs.verify.result == 'success'
+      !cancelled() && needs.verify.result == 'success' && needs.verify.outputs.image != ''
       && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
       && inputs.image-build && inputs.image-push
       && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: ${{ inputs.runner-standard || (github.event.repository.private && vars.CI_RUNNER_STANDARD) || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.runner-light || (github.event.repository.private && vars.CI_RUNNER_LIGHT) || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.verify-timeout-minutes }}
     outputs:
-      digest: ${{ steps.push.outputs.digest }}
-      image: ${{ steps.pinned.outputs.image }}
+      digest: ${{ needs.verify.outputs.digest }}
+      image: ${{ needs.verify.outputs.image }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - name: Push image
-        id: push
-        uses: $/.github/actions/image-build
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
-          context: ${{ inputs.image-context }}
-          dockerfile: ${{ inputs.image-dockerfile }}
-          image: ${{ inputs.image }}
-          tags: ${{ inputs.image-tags }}
-          build-args: ${{ inputs.image-build-args }}
-          platforms: ${{ inputs.image-platforms }}
           registry: ${{ inputs.image-registry }}
-          registry-password: ${{ secrets.registry-password || github.token }}
-          secret-token: ${{ secrets.packages-token || github.token }}
-          revision: ${{ github.sha }}
-          provenance: ${{ inputs.image-provenance }}
-          push: "true"
+          username: ${{ github.actor }}
+          password: ${{ secrets.registry-password || github.token }}
 
-      - name: Pin and compare with the tested image
-        id: pinned
+      - name: Tag the tested digest
         shell: bash
         env:
-          REF: ${{ steps.push.outputs.image }}
-          DIGEST: ${{ steps.push.outputs.digest }}
-          TESTED_ID: ${{ needs.verify.outputs.image-id }}
-          TESTED_ARCH: ${{ needs.verify.outputs.image-arch }}
+          IMAGE: ${{ needs.verify.outputs.image }}
+          TAGS: ${{ inputs.image-tags }}
+          REVISION: ${{ github.sha }}
         run: |
           set -euo pipefail
-          name="$REF"
-          last="${name##*/}"
-          [[ "$last" == *:* ]] && name="${name%:*}"
-          echo "image=${name}@${DIGEST}" >> "$GITHUB_OUTPUT"
-          # The image id of a loaded image is its config digest; find the pushed config for the tested arch.
-          raw=$(docker buildx imagetools inspect --raw "${name}@${DIGEST}")
-          manifest="$DIGEST"
-          if jq -e '.manifests' <<< "$raw" >/dev/null; then
-            manifest=$(jq -r --arg arch "$TESTED_ARCH" '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch)][0].digest // empty' <<< "$raw")
-          fi
-          config=""
-          if [[ -n "$manifest" ]]; then
-            config=$(docker buildx imagetools inspect --raw "${name}@${manifest}" | jq -r '.config.digest // empty')
-          fi
-          if [[ -n "$TESTED_ID" && "$config" == "$TESTED_ID" ]]; then
-            echo "pushed image matches the smoke-tested image ($TESTED_ID)"
-          else
-            echo "::warning::pushed image config ${config:-<unknown>} differs from the smoke-tested ${TESTED_ID:-<unknown>} (cache miss rebuild)"
-          fi
+          name="${IMAGE%@*}"
+          args=()
+          while IFS= read -r tag; do
+            tag="${tag//[[:space:]]/}"
+            [[ -n "$tag" ]] || continue
+            if [[ "$tag" == */* || "$tag" == *:* ]]; then args+=(-t "$tag"); else args+=(-t "${name}:${tag}"); fi
+          done <<< "$TAGS"
+          (( ${#args[@]} )) || args=(-t "${name}:sha-${REVISION}")
+          docker buildx imagetools create "${args[@]}" "$IMAGE"
 
   # Inherits the caller's grant; a permissions block here would fail callers that grant less.
   extra: # zizmor: ignore[excessive-permissions]

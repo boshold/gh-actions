@@ -2,7 +2,8 @@ name: Prisma check
 description: >-
   Verifies Prisma migrations: they deploy on an empty database and cover the schema (no drift).
   Higher levels also guard merged migrations, the migration_lock.toml provider and destructive SQL.
-  Needs Prisma 7 (prisma.config.ts), an installed project, git history reachable via origin, and jq.
+  Needs Prisma 7 (prisma.config.ts), an installed project, git history reachable via origin, jq,
+  and Node 24 (node:sqlite proves that SQLite table rebuilds keep every column).
 
 inputs:
   level:

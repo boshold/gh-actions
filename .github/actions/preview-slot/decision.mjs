@@ -33,3 +33,21 @@ export async function decidePreview(event, listOpenPullRequests, removeLabel) {
     placeholder: false,
   }
 }
+
+// Revalidates the slot right before a deploy. pullRequest: { number, state, labels, headRepository, headSha } | null
+export function checkOwner({ mode, label, repository, prNumber, headSha }, pullRequest, open) {
+  const owners = open.filter(item => item.labels.includes(label) && item.headRepository === repository)
+  if (mode === 'check-idle') {
+    return owners.length === 0
+      ? { owner: true, reason: 'no open pull request owns the slot' }
+      : { owner: false, reason: `#${owners[0].number} owns the slot` }
+  }
+  if (!pullRequest || pullRequest.state !== 'open') return { owner: false, reason: `#${prNumber} is not open` }
+  if (pullRequest.headRepository !== repository) return { owner: false, reason: `#${prNumber} is from a fork` }
+  if (!pullRequest.labels.includes(label)) return { owner: false, reason: `#${prNumber} does not have label ${label}` }
+  if (owners.length !== 1 || owners[0].number !== prNumber) {
+    return { owner: false, reason: `slot owners are ${owners.map(item => `#${item.number}`).join(', ') || 'none'}, not only #${prNumber}` }
+  }
+  if (pullRequest.headSha !== headSha) return { owner: false, reason: `#${prNumber} head moved to ${pullRequest.headSha}` }
+  return { owner: true, reason: `#${prNumber} owns the slot at ${headSha}` }
+}

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016 # SQL with literal $ quotes
 # Scenario tests for .github/actions/prisma-check. Run: tests/prisma-check/run.sh <sqlite|postgresql>
 # Needs `pnpm install` in tests/prisma-check/fixture and jq. postgresql needs a server at PG_URL;
 # with PG_CONTAINER set, databases are created via docker exec, else migrate deploy creates them.
@@ -250,6 +251,58 @@ DROP SCHEMA "legacy";
 ALTER TABLE "public"."user" RENAME TO "people";'; commit
 expect "DELETE FROM, RENAME COLUMN, DROP SCHEMA, DROP TYPE, table rename are destructive" 1 \
   'destructive migration: DELETE FROM,RENAME COLUMN,DROP SCHEMA,DROP TYPE,RENAME TABLE user' LEVEL=strict
+
+setup
+add_migration 20260201000000_do_block 'DO $$ BEGIN TRUNCATE "user"; END $$;'; commit
+expect "DO block body is scanned at strict" 1 'destructive migration: TRUNCATE' LEVEL=strict
+expect "DO block passes at strict with label" 0 'allowed \(label' LEVEL=strict 'PR_LABELS=["migration:destructive"]' PRISMA_COMMAND=true
+
+setup
+add_migration 20260201000000_do_tagged 'do language plpgsql
+$body$
+BEGIN
+  DELETE FROM "user" WHERE "email" = '"'x'"';
+END
+$body$;'; commit
+expect "tagged DO block with LANGUAGE is scanned" 1 'destructive migration: DELETE FROM' LEVEL=strict PRISMA_COMMAND=true
+
+setup
+add_migration 20260201000000_function 'CREATE FUNCTION "wipe"() RETURNS trigger AS $fn$ BEGIN TRUNCATE "user"; RETURN $$x$$; END $fn$ LANGUAGE plpgsql;'; commit
+expect "function bodies stay stripped" 0 '\| destructive SQL \| ok \|' LEVEL=strict PRISMA_COMMAND=true
+
+if [[ "$PROVIDER" == sqlite ]]; then
+  rebuild() { # rebuild <select list> [where]
+    printf '%s\n' 'PRAGMA defer_foreign_keys=ON;
+PRAGMA foreign_keys=OFF;
+CREATE TABLE "new_user" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "email" TEXT NOT NULL,
+    "name" TEXT DEFAULT '"'anon'"'
+);
+INSERT INTO "new_user" ('"$1"') SELECT '"$1"' FROM "user"'"${2:-}"';
+DROP TABLE "user";
+ALTER TABLE "new_user" RENAME TO "user";
+CREATE UNIQUE INDEX "user_email_key" ON "user"("email");
+PRAGMA foreign_keys=ON;
+PRAGMA defer_foreign_keys=OFF;'
+  }
+  with_name_default="${base_schema/  name  String?/  name  String? @default(\"anon\")}"
+
+  setup
+  add_migration 20260201000000_rebuild "$(rebuild '"email", "id", "name"')"
+  printf '%s\n' "$with_name_default" > "$REPO/$SCHEMA"; commit
+  expect "lossless SQLite rebuild passes at strict" 0 '\| destructive SQL \| ok \|' LEVEL=strict
+
+  setup
+  add_migration 20260201000000_rebuild "$(rebuild '"id", "email"')"
+  printf '%s\n' "$with_name_default" > "$REPO/$SCHEMA"; commit
+  expect "lossy SQLite rebuild fails at strict" 1 'DROP TABLE user \(rebuild loses columns or unverifiable\)' LEVEL=strict
+
+  setup
+  add_migration 20260201000000_rebuild "$(rebuild '"email", "id", "name"' ' WHERE "name" IS NOT NULL')"
+  printf '%s\n' "$with_name_default" > "$REPO/$SCHEMA"; commit
+  expect "filtered SQLite rebuild fails at strict" 1 'DROP TABLE user \(rebuild loses' LEVEL=strict
+fi
 
 echo
 echo "passed: $pass  failed: $failed"

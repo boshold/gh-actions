@@ -1,7 +1,9 @@
 name: Image build
 description: >-
   Builds a Docker image with buildx and a gha layer cache. Typical use: build with push false
-  (loaded locally), smoke it, then call again with push true (cache hit) to publish.
+  (loaded locally), smoke it, then call again with push true (cache hit) to publish. To publish the
+  exact bytes that were tested, use push-by-digest, pull and smoke <image>@<digest>, then tag it with
+  docker buildx imagetools create.
 
 inputs:
   context:
@@ -22,6 +24,11 @@ inputs:
     description: Comma-separated platforms, e.g. linux/amd64,linux/arm64; empty is the runner platform
     default: ""
   push:
+    default: "false"
+  push-by-digest:
+    description: >-
+      Push untagged by digest (implies push; tags must be empty, load false). Outputs digest and
+      image = <image>@<digest>
     default: "false"
   load:
     description: Load into the local Docker daemon; empty is true when push is false
@@ -59,11 +66,11 @@ outputs:
     description: Image digest (pushed) or image id (loaded)
     value: ${{ steps.build.outputs.digest }}
   image:
-    description: First full image reference
-    value: ${{ steps.prepare.outputs.image }}
+    description: First full image reference; <image>@<digest> with push-by-digest
+    value: ${{ steps.digest.outputs.image || steps.prepare.outputs.image }}
   refs:
-    description: Newline-separated full image references
-    value: ${{ steps.prepare.outputs.refs }}
+    description: Newline-separated full image references; <image>@<digest> with push-by-digest
+    value: ${{ steps.digest.outputs.image || steps.prepare.outputs.refs }}
 
 runs:
   using: composite
@@ -77,6 +84,7 @@ runs:
         TAGS: ${{ inputs.tags }}
         BUILD_ARGS: ${{ inputs.build-args }}
         PUSH: ${{ inputs.push }}
+        PUSH_BY_DIGEST: ${{ inputs.push-by-digest }}
         LOAD: ${{ inputs.load }}
         REVISION: ${{ inputs.revision || github.sha }}
         VERSION: ${{ inputs.version }}
@@ -87,7 +95,7 @@ runs:
 
     - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-    - if: inputs.push == 'true' || inputs.registry-password != ''
+    - if: inputs.push == 'true' || inputs.push-by-digest == 'true' || inputs.registry-password != ''
       uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
       with:
         registry: ${{ inputs.registry }}
@@ -100,9 +108,10 @@ runs:
         context: ${{ inputs.context }}
         file: ${{ steps.prepare.outputs.dockerfile }}
         platforms: ${{ inputs.platforms }}
-        push: ${{ inputs.push == 'true' }}
+        push: ${{ steps.prepare.outputs.push == 'true' }}
         load: ${{ steps.prepare.outputs.load == 'true' }}
-        tags: ${{ steps.prepare.outputs.refs }}
+        tags: ${{ steps.prepare.outputs.tags }}
+        outputs: ${{ steps.prepare.outputs.outputs }}
         labels: ${{ steps.prepare.outputs.labels }}
         build-args: ${{ steps.prepare.outputs.build-args }}
         secrets: github_npm_token=${{ inputs.secret-token || github.token }}
@@ -110,3 +119,13 @@ runs:
         sbom: ${{ steps.prepare.outputs.sbom == 'true' }}
         cache-from: type=gha,scope=${{ steps.prepare.outputs.cache-scope }}
         cache-to: type=gha,mode=max,scope=${{ steps.prepare.outputs.cache-scope }}
+
+    - id: digest
+      if: inputs.push-by-digest == 'true'
+      shell: bash
+      env:
+        NAME: ${{ steps.prepare.outputs.name }}
+        DIGEST: ${{ steps.build.outputs.digest }}
+      run: |
+        [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no pushed digest: ${DIGEST}"; exit 1; }
+        echo "image=${NAME}@${DIGEST}" >> "$GITHUB_OUTPUT"
