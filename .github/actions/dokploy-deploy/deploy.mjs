@@ -10,8 +10,8 @@ const REQUEST_TIMEOUT_MS = 30_000
 const HEALTH_TIMEOUT_MS = 10_000
 
 export class DeployError extends Error {
-  constructor(code, message) {
-    super(message)
+  constructor(code, message, options) {
+    super(message, options)
     this.name = 'DeployError'
     this.code = code
   }
@@ -51,6 +51,7 @@ export class DokployDeployment {
     this.now = deps.now ?? (() => Date.now())
     this.log = deps.log ?? (line => { process.stdout.write(`${line}\n`) })
     this.attemptId = deps.attemptId ?? (() => randomBytes(4).toString('hex'))
+    this.timeout = deps.timeout ?? (ms => AbortSignal.timeout(ms))
     this.previousImage = null
     this.rolledBack = false
   }
@@ -60,7 +61,9 @@ export class DokployDeployment {
     return `${this.config.project} ${this.config.environment} ${this.config.revision}${kind} [${this.attemptId()}]`
   }
 
-  async request(path, method, body) {
+  // `retry` only for idempotent calls: a timed-out deploy or backup may still be running.
+  async request(path, method, body, { timeoutMs = REQUEST_TIMEOUT_MS, retry = true } = {}) {
+    const attempts = retry ? 3 : 1
     let response
     for (let attempt = 1; ; attempt += 1) {
       try {
@@ -68,14 +71,14 @@ export class DokployDeployment {
           method,
           headers: { 'x-api-key': this.config.apiKey, 'content-type': 'application/json' },
           ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          signal: this.timeout(timeoutMs),
         })
       } catch (error) {
-        if (attempt >= 3) throw new DeployError('DOKPLOY_UNREACHABLE', redact(error))
+        if (attempt >= attempts) throw new DeployError('DOKPLOY_UNREACHABLE', redact(error), { cause: error })
         await this.pause(this.config.pollMs)
         continue
       }
-      if (response.status >= 500 && attempt < 3) {
+      if (response.status >= 500 && attempt < attempts) {
         await this.pause(this.config.pollMs)
         continue
       }
@@ -101,7 +104,7 @@ export class DokployDeployment {
 
   async startDeployment(title) {
     const startedAt = this.now()
-    await this.request('/api/application.deploy', 'POST', { applicationId: this.config.applicationId, title, description: this.config.description })
+    await this.request('/api/application.deploy', 'POST', { applicationId: this.config.applicationId, title, description: this.config.description }, { retry: false })
     return startedAt
   }
 
@@ -139,9 +142,17 @@ export class DokployDeployment {
     throw new DeployError('HEALTH_TIMEOUT', `Timed out waiting for ${what} health (last: ${last})`)
   }
 
+  // Dokploy answers runManually only after the backup finished, so the request gets the whole budget.
   async runBackup(scheduleId) {
     const startedAt = this.now()
-    await this.request('/api/schedule.runManually', 'POST', { scheduleId })
+    try {
+      await this.request('/api/schedule.runManually', 'POST', { scheduleId }, { timeoutMs: this.config.timeoutMs, retry: false })
+    } catch (error) {
+      if (error instanceof DeployError && error.cause instanceof Error && error.cause.name === 'TimeoutError') {
+        throw new DeployError('BACKUP_TIMEOUT', 'The Dokploy backup did not finish within timeout-ms; it may still be running', { cause: error })
+      }
+      throw error
+    }
     const deadline = this.now() + this.config.timeoutMs
     while (this.now() <= deadline) {
       const list = asArray(await this.request(`/api/deployment.allByType?id=${encodeURIComponent(scheduleId)}&type=schedule`, 'GET'), 'schedule deployment')

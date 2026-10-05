@@ -17,6 +17,8 @@ class FakeDokploy {
     this.clock = START
     this.queued = false
     this.pending = []
+    // path -> error thrown by fetch, as a network failure or timeout would
+    this.failures = new Map()
   }
 
   fetch = async (url, init = {}) => {
@@ -29,6 +31,11 @@ class FakeDokploy {
         : new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
     }
     const path = new URL(target).pathname
+    const failure = this.failures.get(path)
+    if (failure) {
+      this.writes.push(`fail ${path}`)
+      throw failure
+    }
     const body = init.body === undefined ? {} : JSON.parse(init.body)
     if (path === '/api/application.one') return this.json({ dockerImage: this.image, applicationStatus: this.applicationStatus })
     if (path === '/api/application.update') {
@@ -76,14 +83,20 @@ function deployment(api, overrides = {}) {
   let now = START
   let attempts = 0
   const logs = []
+  const timeouts = []
   const run = new DokployDeployment(config, {
     fetch: api.fetch,
     pause: async (ms) => { now += ms },
     now: () => now,
     log: line => logs.push(line),
     attemptId: () => `a${++attempts}`,
+    timeout: (ms) => {
+      timeouts.push(ms)
+      return AbortSignal.timeout(ms)
+    },
   })
   run.logs = logs
+  run.timeouts = timeouts
   return run
 }
 
@@ -256,4 +269,20 @@ test('inputs are validated before anything is called', () => {
     { 'poll-ms': '0' }, { 'timeout-ms': '1.5' }, { rollback: 'yes' }]) {
     assert.throws(() => config({ ...base, ...bad }), DeployError, JSON.stringify(bad))
   }
+})
+
+test('the backup request waits for the whole timeout, is not retried and blocks the deploy on timeout', async () => {
+  const api = new FakeDokploy()
+  api.failures.set('/api/schedule.runManually', new DOMException('The operation timed out', 'TimeoutError'))
+  const run = deployment(api, { environment: 'production', backupScheduleId: 'sched-1', timeoutMs: 900_000 })
+  await assert.rejects(run.deploy(), error => error.code === 'BACKUP_TIMEOUT')
+  assert.deepEqual(api.writes, ['fail /api/schedule.runManually'], 'one backup attempt, no image change')
+  assert.ok(run.timeouts.includes(900_000))
+})
+
+test('a deploy request that fails in transit is not sent again', async () => {
+  const api = new FakeDokploy({ health: oldHealthy })
+  api.failures.set('/api/application.deploy', new TypeError('fetch failed'))
+  await assert.rejects(deployment(api, { rollback: false }).deploy(), error => error.code === 'DOKPLOY_UNREACHABLE')
+  assert.deepEqual(api.writes, ['image ghcr.io/x/app:new', 'fail /api/application.deploy'])
 })

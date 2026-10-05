@@ -47,7 +47,7 @@ inputs:
     description: Put the previous image back when the release does not become healthy
     default: "true"
   timeout-ms:
-    description: Budget for each wait, in milliseconds
+    description: Budget for each wait (backup, deployment, health), in milliseconds
     default: "600000"
   poll-ms:
     description: Poll interval, in milliseconds
