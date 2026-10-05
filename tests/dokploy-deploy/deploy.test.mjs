@@ -15,6 +15,8 @@ class FakeDokploy {
     this.image = image
     this.applicationStatus = applicationStatus
     this.clock = START
+    this.queued = false
+    this.pending = []
   }
 
   fetch = async (url, init = {}) => {
@@ -37,7 +39,10 @@ class FakeDokploy {
     if (path === '/api/application.deploy') {
       this.writes.push(`deploy ${body.title}`)
       this.description = body.description
-      this.deployments.push({ title: body.title, createdAt: new Date(this.clock).toISOString(), status: this.deployStates.shift() ?? 'done' })
+      const entry = { title: body.title, createdAt: new Date(this.clock).toISOString(), status: this.deployStates.shift() ?? 'done' }
+      // Real Dokploy queues: the entry shows up only after the first poll
+      if (this.queued) this.pending.push(entry)
+      else this.deployments.push(entry)
       return this.json({})
     }
     if (path === '/api/application.stop') {
@@ -49,7 +54,11 @@ class FakeDokploy {
       this.deployments.push({ scheduleId: body.scheduleId, createdAt: new Date(this.clock).toISOString(), status: this.backupState ?? 'done' })
       return this.json({})
     }
-    if (path === '/api/deployment.all' || path === '/api/deployment.allByType') return this.json(this.deployments)
+    if (path === '/api/deployment.all' || path === '/api/deployment.allByType') {
+      const response = this.json(this.deployments)
+      this.deployments.push(...this.pending.splice(0))
+      return response
+    }
     throw new Error(`fake: unexpected ${path}`)
   }
 
@@ -65,12 +74,14 @@ function deployment(api, overrides = {}) {
     timeoutMs: 1000, pollMs: 10, rollback: true, ...overrides,
   }
   let now = START
+  let attempts = 0
   const logs = []
   const run = new DokployDeployment(config, {
     fetch: api.fetch,
     pause: async (ms) => { now += ms },
     now: () => now,
     log: line => logs.push(line),
+    attemptId: () => `a${++attempts}`,
   })
   run.logs = logs
   return run
@@ -83,7 +94,7 @@ test('a healthy release sets the image, deploys and verifies the revision', asyn
   const api = new FakeDokploy()
   const run = deployment(api)
   await run.deploy()
-  assert.deepEqual(api.writes, ['image ghcr.io/x/app:new', `deploy demo stage ${REVISION}`])
+  assert.deepEqual(api.writes, ['image ghcr.io/x/app:new', `deploy demo stage ${REVISION} [a1]`])
   assert.equal(run.previousImage, 'ghcr.io/x/app:old')
   assert.equal(run.rolledBack, false)
 })
@@ -93,7 +104,7 @@ test('an unhealthy release rolls the previous image back and verifies it answers
   const run = deployment(api)
   await assert.rejects(run.deploy(), error => error.code === 'HEALTH_TIMEOUT')
   assert.deepEqual(api.writes, [
-    'image ghcr.io/x/app:new', `deploy demo stage ${REVISION}`, 'image ghcr.io/x/app:old', `deploy demo stage ${REVISION} rollback`,
+    'image ghcr.io/x/app:new', `deploy demo stage ${REVISION} [a1]`, 'image ghcr.io/x/app:old', `deploy demo stage ${REVISION} rollback [a2]`,
   ])
   assert.equal(api.image, 'ghcr.io/x/app:old')
   assert.equal(run.rolledBack, true)
@@ -114,14 +125,24 @@ test('a failed Dokploy deployment rolls back too, and rollback can be switched o
 
   const plain = new FakeDokploy({ deployStates: ['error'] })
   await assert.rejects(deployment(plain, { rollback: false }).deploy(), error => error.code === 'DEPLOYMENT_FAILED')
-  assert.deepEqual(plain.writes, ['image ghcr.io/x/app:new', `deploy demo stage ${REVISION}`])
+  assert.deepEqual(plain.writes, ['image ghcr.io/x/app:new', `deploy demo stage ${REVISION} [a1]`])
 })
 
 test('a stale deployment entry is ignored, a fresh one is matched', async () => {
   const api = new FakeDokploy()
   api.deployments.push({ title: `demo stage ${REVISION}`, createdAt: new Date(START - 3_600_000).toISOString(), status: 'error' })
   await deployment(api).deploy()
-  assert.ok(api.writes.includes(`deploy demo stage ${REVISION}`))
+  assert.ok(api.writes.includes(`deploy demo stage ${REVISION} [a1]`))
+})
+
+test('a retry ignores the previous attempt\'s recent failure while its own deployment is queued', async () => {
+  const api = new FakeDokploy()
+  api.queued = true
+  api.deployments.push({ title: `demo stage ${REVISION} [a0]`, createdAt: new Date(START - 30_000).toISOString(), status: 'error' })
+  const run = deployment(api)
+  await run.deploy()
+  assert.equal(run.rolledBack, false)
+  assert.equal(api.image, 'ghcr.io/x/app:new')
 })
 
 test('freshest tolerates a Dokploy clock behind the runner and prefers the newest entry', () => {
@@ -191,7 +212,7 @@ test('stop leaves the image alone', async () => {
 test('placeholder deploy verifies idle health on preview', async () => {
   const api = new FakeDokploy({ health: () => ({ status: 'idle' }) })
   await deployment(api, { environment: 'preview', image: 'ghcr.io/x/preview-placeholder:1' }).placeholder()
-  assert.deepEqual(api.writes, ['image ghcr.io/x/preview-placeholder:1', `deploy demo preview ${REVISION}`])
+  assert.deepEqual(api.writes, ['image ghcr.io/x/preview-placeholder:1', `deploy demo preview ${REVISION} [a1]`])
 })
 
 test('placeholder deploy rejects a stale app response and restores the previous image', async () => {

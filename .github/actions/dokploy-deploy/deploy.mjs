@@ -1,4 +1,6 @@
 // Deploys one image to a Dokploy application and proves the running revision.
+import { randomBytes } from 'node:crypto'
+
 const TERMINAL = new Set(['done', 'error'])
 const SHA = /^[0-9a-f]{40}$/u
 const SECRET = /(x-api-key|authorization|token|password)=[^&\s]+/giu
@@ -48,12 +50,14 @@ export class DokployDeployment {
     this.pause = deps.pause ?? (ms => new Promise((resolve) => { setTimeout(resolve, ms) }))
     this.now = deps.now ?? (() => Date.now())
     this.log = deps.log ?? (line => { process.stdout.write(`${line}\n`) })
+    this.attemptId = deps.attemptId ?? (() => randomBytes(4).toString('hex'))
     this.previousImage = null
     this.rolledBack = false
   }
 
-  get title() {
-    return `${this.config.project} ${this.config.environment} ${this.config.revision}`
+  // Unique per attempt, so a retry never matches an earlier attempt's entry
+  title(kind = '') {
+    return `${this.config.project} ${this.config.environment} ${this.config.revision}${kind} [${this.attemptId()}]`
   }
 
   async request(path, method, body) {
@@ -173,7 +177,8 @@ export class DokployDeployment {
     try {
       await this.setImage(this.config.image)
       this.log(`Deploying ${this.config.image}`)
-      await this.waitForDeployment(this.title, await this.startDeployment(this.title))
+      const title = this.title()
+      await this.waitForDeployment(title, await this.startDeployment(title))
       await this.waitForHealth(accept, expectedStatus)
       this.log(expectedStatus === 'idle' ? 'Preview placeholder is healthy' : `Revision ${this.config.revision} is healthy`)
     } catch (error) {
@@ -195,7 +200,7 @@ export class DokployDeployment {
     this.log(`Rolling back to ${previous} after ${redact(cause)}`)
     try {
       await this.setImage(previous)
-      const title = `${this.title} rollback`
+      const title = this.title(' rollback')
       await this.waitForDeployment(title, await this.startDeployment(title))
       await this.waitForHealth(body => body?.status === 'ok' || body?.status === 'idle', 'rollback')
       this.rolledBack = true
