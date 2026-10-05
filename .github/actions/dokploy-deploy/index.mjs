@@ -11,7 +11,7 @@ try {
   else if (mode === 'placeholder') await deployment.placeholder()
   else await deployment.deploy()
 } catch (cause) {
-  error(`${cause instanceof DeployError ? cause.code : 'DEPLOY_FAILED'}: ${redact(cause)}`)
+  error(`${cause instanceof DeployError ? cause.code : 'DEPLOY_FAILED'}: ${redact(cause, [input('api-key')])}`)
   process.exitCode = 1
 } finally {
   setOutput('previous-image', deployment?.previousImage ?? '')

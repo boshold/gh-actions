@@ -17,9 +17,10 @@ export class DeployError extends Error {
   }
 }
 
-export function redact(value) {
+// `secrets` are literal values (the api key) removed wherever they appear.
+export function redact(value, secrets = []) {
   const message = value instanceof Error ? value.message : String(value)
-  return message.replaceAll(SECRET, '$1=[redacted]')
+  return secrets.filter(Boolean).reduce((text, secret) => text.replaceAll(secret, '[redacted]'), message.replaceAll(SECRET, '$1=[redacted]'))
 }
 
 function asArray(payload, what) {
@@ -74,7 +75,7 @@ export class DokployDeployment {
           signal: this.timeout(timeoutMs),
         })
       } catch (error) {
-        if (attempt >= attempts) throw new DeployError('DOKPLOY_UNREACHABLE', redact(error), { cause: error })
+        if (attempt >= attempts) throw new DeployError('DOKPLOY_UNREACHABLE', redact(error, [this.config.apiKey]), { cause: error })
         await this.pause(this.config.pollMs)
         continue
       }
@@ -135,7 +136,7 @@ export class DokployDeployment {
           last = `HTTP ${response.status}`
         }
       } catch (error) {
-        last = redact(error)
+        last = redact(error, [this.config.apiKey])
       }
       await this.pause(this.config.pollMs)
     }
@@ -208,7 +209,7 @@ export class DokployDeployment {
   // Put the image that was serving back and prove it answers again (any revision, or the idle placeholder).
   async rollback(previous, cause) {
     if (!this.config.rollback || previous === null || previous === this.config.image) return
-    this.log(`Rolling back to ${previous} after ${redact(cause)}`)
+    this.log(`Rolling back to ${previous} after ${redact(cause, [this.config.apiKey])}`)
     try {
       await this.setImage(previous)
       const title = this.title(' rollback')
@@ -217,7 +218,7 @@ export class DokployDeployment {
       this.rolledBack = true
       this.log(`Rolled back to ${previous}`)
     } catch (error) {
-      this.log(`::error::Rollback to ${previous} failed: ${redact(error)}`)
+      this.log(`::error::Rollback to ${previous} failed: ${redact(error, [this.config.apiKey])}`)
     }
   }
 
