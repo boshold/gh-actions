@@ -1,20 +1,49 @@
 import { format, inc, latestTag, parse } from '../_lib/semver.mjs'
 
-// A tagged release commit is resumed instead of bumped again, so a run that failed after the
-// push can be repeated until every target is published.
-export function planRelease({ tags, headTags, bump, preid = 'rc', head, parent, expected }) {
+const STABLE = ['patch', 'minor', 'major']
+
+function tryInc(base, bump, preid) {
+  try {
+    return format(inc(base ?? parse('0.0.0'), bump, preid))
+  } catch {
+    return null
+  }
+}
+
+// Decides what to release. `expected` is the commit CI tested (GITHUB_SHA).
+// - HEAD untagged and == expected: bump the highest tag.
+// - HEAD tagged T, HEAD^ == expected: resume T (release commit of the tested commit).
+// - HEAD tagged T, HEAD == expected: resume when T is what this bump gives from the highest other tag
+//   (a release that changed no files); promote when T is a prerelease and the bump is stable; else error.
+// - HEAD is neither: resume the release tag on, or directly on top of, `expected` (checkout that commit),
+//   so a rerun works after the branch moved; else refuse.
+// tagCommits: [{ name, commit, parent }] for v* tags, only needed when HEAD != expected.
+export function planRelease({ tags, headTags, bump, preid = 'rc', head, parent, expected, tagCommits = [] }) {
   inc(parse('0.0.0'), bump, preid)
-  const resumed = latestTag(headTags)
-  if (resumed) {
-    if (head !== expected && parent !== expected) {
-      throw new Error(`${head} is tagged v${format(resumed)} but is not the commit this run tested (${expected})`)
+  const tagged = latestTag(headTags)
+  if (tagged) {
+    const current = format(tagged)
+    if (head !== expected && parent === expected) return { version: current, resumed: true }
+    if (head === expected) {
+      if (tryInc(latestTag(tags.filter(tag => tag !== `v${current}`)), bump, preid) === current) return { version: current, resumed: true }
+      if (tagged.pre.length > 0 && STABLE.includes(bump)) {
+        return { version: format(inc(latestTag(tags), bump, preid)), resumed: false }
+      }
+      throw new Error(`${head} is already released as v${current} and a ${bump} bump would not reproduce it; `
+        + 'there is nothing new to release (only a prerelease can be promoted with a stable bump)')
     }
-    return { version: format(resumed), resumed: true }
+  } else if (head === expected) {
+    return { version: format(inc(latestTag(tags) ?? parse('0.0.0'), bump, preid)), resumed: false }
   }
-  if (head !== expected) {
-    throw new Error(`the branch moved to ${head} after this run tested ${expected}; start a new release`)
+  const candidates = tagCommits.filter(tag => tag.commit === expected || tag.parent === expected)
+  const recovered = latestTag(candidates.map(tag => tag.name))
+  if (recovered) {
+    const name = `v${format(recovered)}`
+    return { version: format(recovered), resumed: true, checkout: candidates.find(tag => tag.name === name).commit }
   }
-  return { version: format(inc(latestTag(tags) ?? parse('0.0.0'), bump, preid)), resumed: false }
+  throw new Error(tagged
+    ? `${head} is tagged v${format(tagged)} but is not the commit this run tested (${expected})`
+    : `the branch moved to ${head} after this run tested ${expected}; start a new release`)
 }
 
 // Workspace globs as pnpm-workspace.yaml writes them: `dir`, `dir/*`, `dir/**`; `!` excludes.

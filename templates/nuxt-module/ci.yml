@@ -12,6 +12,10 @@ on:
       stage:
         type: string
         default: release
+    secrets:
+      # Same name as the repository secret, so direct runs and calls read it the same way.
+      PACKAGES_READ_TOKEN:
+        required: false
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}

@@ -27,14 +27,15 @@ permissions:
 
 jobs:
   ci:
-    uses: ./.github/workflows/ci.yml
+    uses: $/.github/workflows/ci.yml
     permissions:
       contents: read
       packages: read
       pull-requests: write
     with:
       stage: release
-    secrets: inherit
+    secrets:
+      PACKAGES_READ_TOKEN: ${{ secrets.PACKAGES_READ_TOKEN }}
 
   tag:
     needs: ci
@@ -73,11 +74,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p release
+          rm -rf release && mkdir -p release/packages
           for dir in .; do
-            before=$(ls release)
-            (cd "$dir" && pnpm pack --pack-destination "$GITHUB_WORKSPACE/release" >/dev/null)
-            comm -13 <(echo "$before") <(ls release) >> release/order.txt
+            before=$(ls release/packages)
+            (cd "$dir" && pnpm pack --pack-destination "$GITHUB_WORKSPACE/release/packages" >/dev/null)
+            comm -13 <(echo "$before") <(ls release/packages) | sed 's#^#packages/#' >> release/order.txt
           done
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -117,6 +118,7 @@ jobs:
         with:
           registry: npmjs
           packages: ${{ steps.order.outputs.packages }}
-          version: ${{ needs.tag.outputs.version }}
+          # A dry run packs the unbumped branch, so only a real release checks the version.
+          version: ${{ !inputs.dry-run && needs.tag.outputs.version || '' }}
           dry-run: ${{ inputs.dry-run }}
           # stage: "true"  # npm stage publish: approve on npmjs.com with 2FA

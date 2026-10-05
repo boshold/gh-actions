@@ -1,7 +1,11 @@
 name: Release version
 description: >-
-  Computes the next version from the highest vX.Y.Z tag, writes it into every workspace manifest and the
-  extra files, then commits and tags locally (no push). Resumes when HEAD is already tagged. Needs full history.
+  Computes the next version from the highest vX.Y.Z tag, writes it into every workspace manifest and the extra
+  files, then commits and tags locally (no push). Needs full history. Resume and promotion rules (GITHUB_SHA is the
+  tested commit): a tag on HEAD whose parent is GITHUB_SHA, or a tag on GITHUB_SHA equal to what this bump gives,
+  is resumed. A tagged prerelease HEAD with a stable bump is promoted (new commit if files change, else a second
+  tag on the same commit). Any other already tagged GITHUB_SHA fails as nothing new to release. When the branch
+  moved since GITHUB_SHA, the release tag on or directly above GITHUB_SHA is checked out and resumed.
 
 inputs:
   bump:

@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   ci:
-    uses: ./.github/workflows/ci.yml
+    uses: $/.github/workflows/ci.yml
     permissions:
       contents: read
       packages: write
@@ -27,7 +27,8 @@ jobs:
       image-tags: |
         main
         sha-${{ github.sha }}
-    secrets: inherit
+    secrets:
+      PACKAGES_READ_TOKEN: ${{ secrets.PACKAGES_READ_TOKEN }}
 
   deploy:
     needs: ci

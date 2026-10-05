@@ -26,8 +26,12 @@ export function writeChecksums(files, dir) {
   return path
 }
 
+// Drafts have no tag lookup, so fall back to the (newest-first) release list.
 export async function releaseByTag(client, repo, tag) {
-  return client.request('GET', `/repos/${repo}/releases/tags/${encodeURIComponent(tag)}`, { allow404: true })
+  const published = await client.request('GET', `/repos/${repo}/releases/tags/${encodeURIComponent(tag)}`, { allow404: true })
+  if (published) return published
+  const match = release => release.tag_name === tag
+  return (await client.paginate(`/repos/${repo}/releases?per_page=100`, data => data, match)).find(match) ?? null
 }
 
 // clobber: replace an existing asset of the same name; otherwise keep it.

@@ -9,6 +9,14 @@ import {
 
 const BOT = { name: 'github-actions[bot]', email: '41898282+github-actions[bot]@users.noreply.github.com' }
 
+function tagCommits() {
+  return lines(git('for-each-ref', '--format=%(refname:short) %(objectname) %(*objectname)', 'refs/tags/v*')).map((line) => {
+    const [name, object, peeled] = line.split(' ')
+    const commit = peeled || object
+    return { name, commit, parent: gitTry('rev-parse', '--verify', '--quiet', `${commit}^`) }
+  })
+}
+
 await run(() => {
   const workingDirectory = input('working-directory') || '.'
   process.chdir(workingDirectory)
@@ -17,6 +25,7 @@ await run(() => {
   })
 
   const head = git('rev-parse', 'HEAD')
+  const expected = process.env.GITHUB_SHA ?? ''
   const plan = planRelease({
     tags: lines(git('tag', '--list', 'v*')),
     headTags: lines(git('tag', '--points-at', 'HEAD')),
@@ -24,8 +33,13 @@ await run(() => {
     preid: input('preid') || 'rc',
     head,
     parent: gitTry('rev-parse', '--verify', '--quiet', 'HEAD^'),
-    expected: process.env.GITHUB_SHA ?? '',
+    expected,
+    tagCommits: head === expected ? [] : tagCommits(),
   })
+  if (plan.checkout) {
+    git('checkout', '--quiet', '--detach', plan.checkout)
+    console.log(`Resuming v${plan.version} at ${plan.checkout}`)
+  }
   const { version } = plan
 
   const patterns = existsSync('pnpm-workspace.yaml') ? workspacePatterns(readFileSync('pnpm-workspace.yaml', 'utf8')) : []

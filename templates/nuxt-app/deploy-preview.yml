@@ -7,15 +7,30 @@ on:
   pull_request:
     types: [labeled, unlabeled, synchronize, reopened, closed]
 
-concurrency:
-  group: deploy-preview
-  cancel-in-progress: false
-
 permissions:
   contents: read
 
 jobs:
+  # Ungrouped: unrelated PR events stop here, so they never replace a pending preview run.
+  filter:
+    if: >-
+      (github.event.action == 'labeled' || github.event.action == 'unlabeled')
+      && github.event.label.name == 'preview'
+      || (github.event.action != 'labeled' && github.event.action != 'unlabeled'
+      && contains(github.event.pull_request.labels.*.name, 'preview'))
+    runs-on: ${{ (github.event.repository.private && vars.CI_RUNNER_LIGHT) || 'ubuntu-latest' }}
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: Relevant for the preview slot
+        shell: bash
+        run: echo "preview event"
+
   slot:
+    needs: filter
+    concurrency:
+      group: deploy-preview
+      cancel-in-progress: false
     runs-on: ${{ (github.event.repository.private && vars.CI_RUNNER_LIGHT) || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions:
@@ -32,7 +47,7 @@ jobs:
   ci:
     needs: slot
     if: needs.slot.outputs.deploy == 'true'
-    uses: ./.github/workflows/ci.yml
+    uses: $/.github/workflows/ci.yml
     permissions:
       contents: read
       packages: write
@@ -41,11 +56,15 @@ jobs:
       stage: fast
       image-push: true
       image-tags: pr-${{ github.event.pull_request.number }}
-    secrets: inherit
+    secrets:
+      PACKAGES_READ_TOKEN: ${{ secrets.PACKAGES_READ_TOKEN }}
 
   deploy:
     needs: [slot, ci]
     if: needs.slot.outputs.deploy == 'true'
+    concurrency:
+      group: deploy-preview
+      cancel-in-progress: false
     uses: boshold/gh-actions-public/.github/workflows/deploy-dokploy.yml@v1
     permissions:
       contents: read
@@ -64,6 +83,9 @@ jobs:
   placeholder:
     needs: slot
     if: needs.slot.outputs.placeholder == 'true'
+    concurrency:
+      group: deploy-preview
+      cancel-in-progress: false
     uses: boshold/gh-actions-public/.github/workflows/deploy-dokploy.yml@v1
     permissions:
       contents: read

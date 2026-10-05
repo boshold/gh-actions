@@ -30,6 +30,14 @@ on:
       make-latest:
         type: string
         default: auto
+        description: auto (highest stable version only), true or false; for drafts applied on finalize
+      draft:
+        type: boolean
+        default: false
+        description: >-
+          Leave the release as a draft because a later caller job uploads the assets; that job then
+          runs the release-publish action with mode finalize. Assets given here are uploaded to a
+          draft and published by this workflow automatically
       artifacts:
         type: string
         default: ""
@@ -63,6 +71,7 @@ on:
       prerelease:
         value: ${{ jobs.release.outputs.prerelease }}
       release-url:
+        description: Release URL (a draft URL while draft is true)
         value: ${{ jobs.release.outputs.url }}
 
 jobs:
@@ -115,6 +124,8 @@ jobs:
           dry-run: ${{ inputs.dry-run }}
           resumed: ${{ steps.version.outputs.resumed }}
           prerelease: ${{ steps.version.outputs.prerelease }}
+          # Never visible (or latest) before its assets exist.
+          draft: ${{ inputs.draft || inputs.assets != '' || inputs.artifacts != '' }}
           make-latest: ${{ inputs.make-latest }}
           token: ${{ secrets.release-token || github.token }}
 
@@ -125,3 +136,13 @@ jobs:
           tag: ${{ steps.version.outputs.tag }}
           files: ${{ inputs.assets || 'release-assets/*' }}
           checksums: ${{ inputs.checksums }}
+
+      - name: Publish the release
+        if: ${{ !inputs.draft && (inputs.assets != '' || inputs.artifacts != '') }}
+        uses: $/.github/actions/release-publish
+        with:
+          mode: finalize
+          tag: ${{ steps.version.outputs.tag }}
+          dry-run: ${{ inputs.dry-run }}
+          make-latest: ${{ inputs.make-latest }}
+          token: ${{ secrets.release-token || github.token }}

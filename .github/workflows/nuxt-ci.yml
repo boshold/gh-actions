@@ -181,7 +181,7 @@ on:
       image-push:
         type: boolean
         default: false
-        description: Push (image-push job) after every other job passed; never for fork pull requests
+        description: Push (image-push job) after every other job passed; never for fork pull requests. The push rebuilds from the build cache; a cache miss can produce different bytes than the smoke-tested image (logged as a warning)
       image:
         type: string
         default: ""
@@ -630,7 +630,7 @@ jobs:
           if [[ -n "$TESTED_ID" && "$config" == "$TESTED_ID" ]]; then
             echo "pushed image matches the smoke-tested image ($TESTED_ID)"
           else
-            echo "::notice::pushed image config ${config:-<unknown>} differs from the smoke-tested ${TESTED_ID:-<unknown>} (cache miss rebuild)"
+            echo "::warning::pushed image config ${config:-<unknown>} differs from the smoke-tested ${TESTED_ID:-<unknown>} (cache miss rebuild)"
           fi
 
   # Inherits the caller's grant; a permissions block here would fail callers that grant less.

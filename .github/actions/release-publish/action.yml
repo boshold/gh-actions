@@ -1,11 +1,12 @@
 name: Release publish
 description: >-
   gate: fails unless the run is on the release branch. publish: atomically pushes the release commit and tag
-  with an explicit token (nothing persisted), then creates the GitHub release idempotently and uploads assets.
+  with an explicit token (env-only, hooks disabled, nothing persisted), then creates the GitHub release
+  idempotently (optionally as draft) and uploads assets. finalize: publishes the draft release of `tag`.
 
 inputs:
   mode:
-    description: gate (branch check only, run before any build) or publish
+    description: gate (branch check only, run before any build), publish, or finalize (publish a draft)
     default: publish
   tag:
     description: Release tag (publish)
@@ -17,7 +18,7 @@ inputs:
     description: Branch to release from and push to; defaults to the repository default branch
     default: ""
   dry-run:
-    description: Skip the branch gate, push and release
+    description: Skip the branch gate, push, release and finalize
     default: "false"
   resumed:
     description: release-version resumed output; allows an existing remote tag at the same commit
@@ -25,8 +26,11 @@ inputs:
   prerelease:
     description: Mark the GitHub release as prerelease
     default: "false"
+  draft:
+    description: Create the release as a draft; publish it later with mode finalize
+    default: "false"
   make-latest:
-    description: auto (only the highest stable version), true or false
+    description: auto (only the highest stable version), true or false; for drafts applied on finalize
     default: auto
   assets:
     description: Newline-separated globs uploaded to the release; existing names are kept

@@ -1,7 +1,9 @@
 name: Release
 
-# Binary release: CI, then version commit + tag + GitHub release (release-tag), then each target is
-# built from the tag in this workflow and uploaded with SHA256SUMS. The toolchain setup stays here.
+# Binary release: CI, then version commit + tag + draft GitHub release (release-tag), then each
+# target is built from the tag in this workflow; the assets job uploads them with SHA256SUMS and only
+# then publishes the release, so it is never visible (or latest) without its binaries.
+# The toolchain setup stays here.
 
 on:
   workflow_dispatch:
@@ -25,7 +27,7 @@ permissions:
 
 jobs:
   ci:
-    uses: ./.github/workflows/ci.yml
+    uses: $/.github/workflows/ci.yml
 
   tag:
     needs: ci
@@ -37,6 +39,7 @@ jobs:
       dry-run: ${{ inputs.dry-run }}
       # Files that carry the version, e.g. Cargo.toml or VERSION.
       version-files: VERSION
+      draft: true
 
   build:
     needs: tag
@@ -98,3 +101,8 @@ jobs:
           tag: ${{ needs.tag.outputs.tag }}
           files: dist/*
           checksums: "true"
+
+      - uses: boshold/gh-actions-public/.github/actions/release-publish@v1
+        with:
+          mode: finalize
+          tag: ${{ needs.tag.outputs.tag }}

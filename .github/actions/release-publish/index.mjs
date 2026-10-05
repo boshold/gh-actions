@@ -1,12 +1,12 @@
 import { bool, input, lines, mask, notice, run, setOutput, summary } from '../_lib/core.mjs'
-import { git } from '../_lib/git.mjs'
+import { basicAuth, git, gitWithToken } from '../_lib/git.mjs'
 import { createClient, readEvent, repository } from '../_lib/github.mjs'
 import { expandGlobs, uploadAssets } from '../_lib/release.mjs'
-import { checkGate, ensureRelease, makeLatest, planPush, remoteTagCommit } from './publish.mjs'
+import { checkGate, ensureRelease, finalizeRelease, makeLatest, planPush, remoteTagCommit, remoteTags } from './publish.mjs'
 
 await run(async () => {
   const mode = input('mode') || 'publish'
-  if (!['gate', 'publish'].includes(mode)) throw new Error(`mode must be gate or publish, got "${mode}"`)
+  if (!['gate', 'publish', 'finalize'].includes(mode)) throw new Error(`mode must be gate, publish or finalize, got "${mode}"`)
   const dryRun = bool('dry-run')
   const token = input('token', { required: true })
   mask(token)
@@ -23,17 +23,23 @@ await run(async () => {
   if (mode === 'gate') return
 
   const tag = input('tag', { required: true })
+  if (mode === 'finalize') {
+    if (dryRun) return notice(`Dry run: would publish the draft release ${tag}`)
+    const release = await finalizeRelease(client, repo, { tag, makeLatest: input('make-latest') || 'auto' })
+    setOutput('release-id', release.id)
+    setOutput('url', release.html_url)
+    return summary(`Released [${tag}](${release.html_url})`)
+  }
   const sha = input('sha', { required: true })
   const prerelease = bool('prerelease')
+  const draft = bool('draft')
   const workingDirectory = input('working-directory') || '.'
   process.chdir(workingDirectory)
   const assets = expandGlobs(lines(input('assets')))
 
   const remote = `${process.env.GITHUB_SERVER_URL || 'https://github.com'}/${repo}.git`
-  const auth = `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`
-  mask(auth.split(' ').at(-1))
-  // Reset inherited extraheaders so only this token is sent; nothing is persisted.
-  const authed = (...args) => git('-c', 'http.extraheader=', '-c', `http.extraheader=${auth}`, ...args)
+  mask(basicAuth(token))
+  const authed = (...args) => gitWithToken(token, ...args)
 
   const action = planPush({
     remoteCommit: remoteTagCommit(authed('ls-remote', remote, `refs/tags/${tag}`, `refs/tags/${tag}^{}`), tag),
@@ -58,11 +64,12 @@ await run(async () => {
     tag,
     sha,
     prerelease,
-    makeLatest: makeLatest(input('make-latest') || 'auto', tag, lines(git('tag', '--list', 'v*')), prerelease),
+    draft,
+    makeLatest: makeLatest(input('make-latest') || 'auto', tag, await remoteTags(client, repo), prerelease),
   })
   if (assets.length > 0) await uploadAssets(client, repo, release, assets, { clobber: false })
 
   setOutput('release-id', release.id)
   setOutput('url', release.html_url)
-  summary(`Released [${tag}](${release.html_url})`)
+  summary(release.draft ? `Draft release [${tag}](${release.html_url}); run mode: finalize to publish` : `Released [${tag}](${release.html_url})`)
 })

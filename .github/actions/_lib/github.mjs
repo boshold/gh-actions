@@ -59,8 +59,8 @@ export function createClient({
     return result === null ? null : result.data
   }
 
-  // `pick` extracts the array from wrapped responses such as { workflow_runs: [...] }.
-  async function paginate(path, pick = data => data) {
+  // `pick` extracts the array from wrapped responses such as { workflow_runs: [...] }; `until` stops early.
+  async function paginate(path, pick = data => data, until = () => false) {
     const items = []
     let next = path
     while (next) {
@@ -68,6 +68,7 @@ export function createClient({
       const page = pick(data)
       if (!Array.isArray(page)) throw new Error(`GitHub GET ${next} returned no list`)
       items.push(...page)
+      if (page.some(until)) break
       next = /<([^>]+)>;\s*rel="next"/.exec(link)?.[1]
     }
     return items

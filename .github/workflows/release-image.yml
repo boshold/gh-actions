@@ -6,7 +6,8 @@ name: Release image
 # stable version). Nothing reaches the registry before smoke and scan passed, and no version tag
 # exists before the git tag does.
 # Callers run their CI (stage: release) first and grant contents: write and packages: write.
-# Every step after the push is idempotent: a failed run is fixed by re-running it.
+# Every step after the push is idempotent: a failed run is fixed by re-running it. A resumed run
+# reuses an already pushed sha-<sha> image (smoke and scan still run against it).
 
 on:
   workflow_call:
@@ -155,8 +156,8 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
       sha: ${{ steps.version.outputs.sha }}
       prerelease: ${{ steps.version.outputs.prerelease }}
-      digest: ${{ steps.push.outputs.digest }}
-      image: ${{ steps.push.outputs.digest && format('{0}@{1}', steps.name.outputs.image, steps.push.outputs.digest) || '' }}
+      digest: ${{ steps.existing.outputs.digest || steps.push.outputs.digest }}
+      image: ${{ (steps.existing.outputs.digest || steps.push.outputs.digest) && format('{0}@{1}', steps.name.outputs.image, steps.existing.outputs.digest || steps.push.outputs.digest) || '' }}
     steps:
 
       - name: Require the release branch
@@ -205,8 +206,40 @@ jobs:
           mailpit-version: ${{ inputs.mailpit-version }}
           compose-file: ${{ inputs.compose-file }}
 
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        if: ${{ !inputs.dry-run }}
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.registry-password || github.token }}
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        if: ${{ !inputs.dry-run && steps.version.outputs.resumed == 'true' }}
+
+      # A resumed release whose sha tag is already pushed reuses those bytes instead of rebuilding.
+      - id: existing
+        name: Reuse the pushed image
+        if: ${{ !inputs.dry-run && steps.version.outputs.resumed == 'true' }}
+        shell: bash
+        env:
+          IMAGE: ${{ steps.name.outputs.image }}
+          SHA: ${{ steps.version.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if ! manifest=$(docker buildx imagetools inspect "$IMAGE:sha-$SHA" --format '{{json .Manifest}}' 2>/dev/null); then
+            echo "$IMAGE:sha-$SHA not pushed yet, building"
+            exit 0
+          fi
+          digest=$(jq -r '.digest' <<< "$manifest")
+          [[ "$digest" == sha256:* ]] || { echo "::error::cannot read the digest of $IMAGE:sha-$SHA"; exit 1; }
+          docker pull "$IMAGE@$digest"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "image=$IMAGE@$digest" >> "$GITHUB_OUTPUT"
+          echo "reusing $IMAGE@$digest"
+
       - id: build
         name: Build image
+        if: steps.existing.outputs.digest == ''
         uses: $/.github/actions/image-build
         with:
           context: ${{ inputs.context }}
@@ -225,7 +258,7 @@ jobs:
       - name: Boot the image and prove the revision
         uses: $/.github/actions/image-smoke
         with:
-          image: ${{ steps.build.outputs.image }}
+          image: ${{ steps.existing.outputs.image || steps.build.outputs.image }}
           revision: ${{ steps.version.outputs.sha }}
           port: ${{ inputs.port }}
           health-path: ${{ inputs.health-path }}
@@ -239,7 +272,7 @@ jobs:
         if: inputs.scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ${{ steps.build.outputs.image }}
+          image-ref: ${{ steps.existing.outputs.image || steps.build.outputs.image }}
           format: table
           scanners: vuln
           severity: HIGH,CRITICAL
@@ -250,7 +283,7 @@ jobs:
         if: inputs.scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ${{ steps.build.outputs.image }}
+          image-ref: ${{ steps.existing.outputs.image || steps.build.outputs.image }}
           format: spdx-json
           output: ${{ runner.temp }}/${{ steps.name.outputs.sbom }}
           exit-code: "0"
@@ -258,7 +291,7 @@ jobs:
       # Only the immutable sha tag; version tags follow the git tag below.
       - id: push
         name: Push image
-        if: ${{ !inputs.dry-run }}
+        if: ${{ !inputs.dry-run && steps.existing.outputs.digest == '' }}
         uses: $/.github/actions/image-build
         with:
           context: ${{ inputs.context }}
@@ -284,22 +317,16 @@ jobs:
           resumed: ${{ steps.version.outputs.resumed }}
           prerelease: ${{ steps.version.outputs.prerelease }}
           make-latest: ${{ inputs.make-latest }}
+          # Existing asset names are kept, so a resumed release does not replace its SBOM.
           assets: ${{ inputs.scan && format('{0}/{1}', runner.temp, steps.name.outputs.sbom) || '' }}
           token: ${{ secrets.release-token || github.token }}
-
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        if: ${{ !inputs.dry-run }}
-        with:
-          registry: ${{ inputs.registry }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.registry-password || github.token }}
 
       - name: Publish the version tags
         if: ${{ !inputs.dry-run }}
         shell: bash
         env:
           IMAGE: ${{ steps.name.outputs.image }}
-          DIGEST: ${{ steps.push.outputs.digest }}
+          DIGEST: ${{ steps.existing.outputs.digest || steps.push.outputs.digest }}
           TAG: ${{ steps.version.outputs.tag }}
           VERSION: ${{ steps.version.outputs.version }}
           PRERELEASE: ${{ steps.version.outputs.prerelease }}

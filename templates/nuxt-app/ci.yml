@@ -19,6 +19,10 @@ on:
       image-tags:
         type: string
         default: ""
+    secrets:
+      # Same name as the repository secret, so direct runs and calls read it the same way.
+      PACKAGES_READ_TOKEN:
+        required: false
     outputs:
       image:
         description: Pushed image pinned by digest

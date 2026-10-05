@@ -35,11 +35,13 @@ jobs:
           set -euo pipefail
           copy="$RUNNER_TEMP/lint"
           cp -r . "$copy"
-          sed -i 's#uses: \$/#uses: ./#' "$copy"/.github/workflows/*.yml "$copy"/.github/actions/*/action.yml
+          mapfile -t templates < <(cd "$copy" && find templates -name '*.yml' ! -name dependabot.yml | sort)
+          sed -i 's#uses: \$/#uses: ./#' "$copy"/.github/workflows/*.yml "$copy"/.github/actions/*/action.yml \
+            "${templates[@]/#/$copy/}"
           docker run --rm -v "$copy:/repo" -w /repo "$ACTIONLINT" -color \
             -ignore 'property "workflow_(repository|sha)" is not defined'
-          mapfile -t templates < <(find templates -name '*.yml' ! -name dependabot.yml | sort)
-          docker run --rm -v "$PWD:/repo" -w /repo "$ACTIONLINT" -color \
+          # Templates call the consumer's own ci.yml, which does not exist here.
+          docker run --rm -v "$copy:/repo" -w /repo "$ACTIONLINT" -color \
             -ignore 'could not read reusable workflow file for "./.github/workflows/ci.yml"' "${templates[@]}"
 
       - name: shellcheck
@@ -199,3 +201,13 @@ jobs:
       context: tests/fixtures/app
       smoke-env: |
         DEPLOYMENT_ENVIRONMENT=ci
+
+  release-npm:
+    permissions:
+      contents: write
+      packages: write
+    uses: $/.github/workflows/release-npm.yml
+    with:
+      bump: preminor
+      dry-run: true
+      working-directory: tests/fixtures/app

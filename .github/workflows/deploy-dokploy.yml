@@ -4,6 +4,9 @@ name: Deploy to Dokploy
 # application at the image, prove the running revision (rollback with health check otherwise) and
 # report back. Never builds: deploy the digest CI or release-image produced.
 # Callers grant contents: read and deployments: write. One deployment per application at a time.
+# The job declares no `environment:`, so GitHub environment protection rules (reviewers, branch
+# limits) do not apply here; the caller passes the Dokploy secret. Gate production in the caller,
+# e.g. with an environment on a job this one needs.
 
 on:
   workflow_call:

@@ -23,10 +23,40 @@ test('plan bumps the latest tag, or starts from 0.0.0', () => {
 
 test('plan resumes a tagged release commit instead of bumping again', () => {
   const tags = ['v0.5.1', 'v0.6.0']
-  const repeatedJob = { tags, headTags: ['v0.6.0'], bump: 'minor', head: 'b', parent: 'a', expected: 'a' }
-  assert.deepEqual(planRelease(repeatedJob), { version: '0.6.0', resumed: true })
-  assert.deepEqual(planRelease({ ...repeatedJob, expected: 'b' }), { version: '0.6.0', resumed: true })
-  assert.deepEqual(planRelease({ ...repeatedJob, headTags: ['v0.6.0-rc.0'], parent: null, expected: 'b' }), { version: '0.6.0-rc.0', resumed: true })
+  const releaseCommit = { tags, headTags: ['v0.6.0'], bump: 'minor', head: 'b', parent: 'a', expected: 'a' }
+  assert.deepEqual(planRelease(releaseCommit), { version: '0.6.0', resumed: true })
+  // Release without file changes: the tag sits on the tested commit and matches the bump.
+  assert.deepEqual(planRelease({ ...releaseCommit, expected: 'b' }), { version: '0.6.0', resumed: true })
+  assert.deepEqual(planRelease({ ...releaseCommit, tags: ['v1.0.0', 'v1.0.1-rc.0'], headTags: ['v1.0.1-rc.0'], bump: 'prerelease', parent: null, expected: 'b' }), {
+    version: '1.0.1-rc.0', resumed: true,
+  })
+})
+
+test('plan refuses to re-release a tagged commit with nothing new', () => {
+  const job = { tags: ['v0.5.1', 'v0.6.0'], headTags: ['v0.6.0'], head: 'b', parent: 'a', expected: 'b' }
+  assert.throws(() => planRelease({ ...job, bump: 'patch' }), /already released as v0\.6\.0.*nothing new/)
+  assert.throws(() => planRelease({ ...job, tags: ['v0.9.0', 'v1.0.0-rc.0'], headTags: ['v1.0.0-rc.0'], bump: 'preminor' }), /nothing new/)
+})
+
+test('plan promotes a tagged prerelease with a stable bump', () => {
+  const job = { tags: ['v1.1.0', 'v1.2.0-rc.0', 'v1.2.0-rc.1'], headTags: ['v1.2.0-rc.1'], head: 'b', parent: 'a', expected: 'b' }
+  assert.deepEqual(planRelease({ ...job, bump: 'patch' }), { version: '1.2.0', resumed: false })
+  assert.deepEqual(planRelease({ ...job, bump: 'major' }), { version: '2.0.0', resumed: false })
+  // Rerun of a promotion that changed no files: both tags on HEAD.
+  assert.deepEqual(planRelease({ ...job, tags: [...job.tags, 'v1.2.0'], headTags: ['v1.2.0-rc.1', 'v1.2.0'], bump: 'patch' }), {
+    version: '1.2.0', resumed: true,
+  })
+})
+
+test('plan recovers the release tag of the tested commit after the branch moved', () => {
+  const tagCommits = [
+    { name: 'v0.5.1', commit: 'x', parent: 'w' },
+    { name: 'v0.6.0', commit: 'r', parent: 'a' },
+  ]
+  const job = { tags: ['v0.5.1', 'v0.6.0'], headTags: [], bump: 'minor', head: 'm', parent: 'r', expected: 'a', tagCommits }
+  assert.deepEqual(planRelease(job), { version: '0.6.0', resumed: true, checkout: 'r' })
+  assert.deepEqual(planRelease({ ...job, expected: 'x' }), { version: '0.5.1', resumed: true, checkout: 'x' })
+  assert.throws(() => planRelease({ ...job, expected: 'q' }), /the branch moved/)
 })
 
 test('plan refuses a branch that moved after the tested commit', () => {
@@ -176,8 +206,8 @@ test('run commits and tags the bump, then resumes on a repeated run', () => {
 })
 
 test('run refuses when the branch moved after the tested commit', () => {
-  const { git, run } = workspaceRepository()
-  assert.throws(() => run('patch', git('rev-parse', 'HEAD^')), /the branch moved/)
+  const { run } = workspaceRepository()
+  assert.throws(() => run('patch', '0'.repeat(40)), /the branch moved/)
 })
 
 test('run releases a single-commit repository and a prerelease', () => {
@@ -246,4 +276,36 @@ test('workspace path dependencies pinned to the old version follow the bump', ()
     .replace('crates/a", version = "1.0.0"', 'crates/a", version = "1.1.0"')
     .replace('version = "=1.0.0"', 'version = "=1.1.0"'))
   assert.equal(setCargoPathDependencyVersions('[package]\nname = "x"\n', '1.0.0', '1.1.0'), '[package]\nname = "x"\n')
+})
+
+test('run promotes a prerelease with a new commit, or a second tag when no file changes', () => {
+  const { git, run, read } = repository({ 'package.json': '{\n  "name": "solo",\n  "version": "0.0.0"\n}\n' })
+  const rc = run('prerelease', git('rev-parse', 'HEAD'))
+  assert.equal(rc.version, '0.0.1-rc.0')
+  const promoted = run('patch', rc.sha)
+  assert.equal(promoted.version, '0.0.1')
+  assert.equal(promoted.resumed, 'false')
+  assert.equal(git('rev-parse', 'HEAD^'), rc.sha)
+  assert.equal(JSON.parse(read('package.json')).version, '0.0.1')
+  assert.equal(run('patch', rc.sha).resumed, 'true')
+
+  const bare = repository({ 'README.md': 'x\n' })
+  const head = bare.git('rev-parse', 'HEAD')
+  assert.equal(bare.run('prerelease', head).version, '0.0.1-rc.0')
+  const stable = bare.run('minor', head)
+  assert.deepEqual([stable.version, stable.sha, stable.resumed], ['0.1.0', head, 'false'])
+  assert.equal(bare.git('tag', '--points-at', 'HEAD'), 'v0.0.1-rc.0\nv0.1.0')
+  assert.equal(bare.run('minor', head).resumed, 'true')
+  assert.throws(() => bare.run('patch', head), /already released as v0\.1\.0/)
+})
+
+test('run resumes the release of the tested commit after the branch moved', () => {
+  const { git, write, commit, run } = workspaceRepository()
+  const tested = git('rev-parse', 'HEAD')
+  const first = run('minor', tested, { INPUT_FILES: 'VERSION' })
+  write({ 'later.txt': 'x\n' })
+  commit('feat: later')
+  const again = run('minor', tested, { INPUT_FILES: 'VERSION' })
+  assert.deepEqual(again, { ...first, resumed: 'true' })
+  assert.equal(git('rev-parse', 'HEAD'), first.sha)
 })
