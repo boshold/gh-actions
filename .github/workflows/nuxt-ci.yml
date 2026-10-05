@@ -1,0 +1,648 @@
+name: Nuxt CI
+
+# Reusable CI for pnpm/Nuxt apps.
+# Stages: fast = check job (lint, typecheck, unit); full = + verify job (services, migrate, prisma
+# check, seed, e2e, build, image build+smoke); release = full + release-stage extra tests.
+# Jobs declare no permissions: a called workflow can only narrow the caller's grant. Callers grant
+# contents: read, packages: read (+ pull-requests: write for coverage-report, packages: write for image-push).
+
+on:
+  workflow_call:
+    inputs:
+      stage:
+        type: string
+        default: fast
+        description: fast, full or release
+      parallel:
+        type: boolean
+        default: false
+        description: Split the check job into lint, typecheck and test jobs
+      runner-light:
+        type: string
+        default: ""
+      runner-standard:
+        type: string
+        default: ""
+      runner-arm64:
+        type: string
+        default: ""
+        description: Extra tests with runner arm64
+      runner-macos:
+        type: string
+        default: ""
+        description: Extra tests with runner macos
+      working-directory:
+        type: string
+        default: "."
+        description: Directory for project commands
+      install-directory:
+        type: string
+        default: "."
+        description: Directory the install runs in (package.json, lockfile, .nvmrc)
+      node-version:
+        type: string
+        default: ""
+        description: Empty reads .nvmrc, .node-version or package.json engines, else 24
+      pnpm-version:
+        type: string
+        default: ""
+      registry:
+        type: string
+        default: github
+        description: Registry of the scoped packages, github or npmjs
+      registry-scope:
+        type: string
+        default: ""
+        description: Empty is @<repository owner>
+      install-command:
+        type: string
+        default: pnpm install --frozen-lockfile
+      cache:
+        type: string
+        default: auto
+        description: auto (GitHub cache unless the runner sets CI_LOCAL_CACHE=1) or off
+      env:
+        type: string
+        default: ""
+        description: Multiline KEY=VALUE exported to every job
+      prepare-command:
+        type: string
+        default: ""
+        description: Runs after install in every job, e.g. pnpm exec prisma generate
+      lint-command:
+        type: string
+        default: pnpm lint
+      lint-cache-path:
+        type: string
+        default: .eslintcache
+        description: Lint cache file/dir relative to working-directory (lint must use --cache); empty disables
+      typecheck-command:
+        type: string
+        default: pnpm typecheck
+      test-command:
+        type: string
+        default: pnpm test
+        description: Unit tests (every stage)
+      unit-services:
+        type: boolean
+        default: false
+        description: Start the services for the unit tests too
+      coverage-report:
+        type: boolean
+        default: false
+        description: Vitest coverage PR comment for the unit tests (needs pull-requests write)
+      coverage-summary-paths:
+        type: string
+        default: coverage/coverage-summary.json
+        description: Newline-separated json-summary files relative to working-directory
+      postgres-version:
+        type: string
+        default: ""
+      postgres-user:
+        type: string
+        default: postgres
+      postgres-password:
+        type: string
+        default: postgres
+      postgres-db:
+        type: string
+        default: postgres
+      postgres-extra-databases:
+        type: string
+        default: ""
+      mailpit-version:
+        type: string
+        default: ""
+      compose-file:
+        type: string
+        default: ""
+        description: Optional docker compose file started with --wait
+      migrate-command:
+        type: string
+        default: ""
+      prisma-check:
+        type: string
+        default: ""
+        description: basic, standard or strict; empty skips. Uses DATABASE_URL
+      prisma-schema:
+        type: string
+        default: prisma/schema.prisma
+      prisma-migrations:
+        type: string
+        default: prisma/migrations
+      prisma-require-transaction:
+        type: boolean
+        default: false
+      seed-command:
+        type: string
+        default: ""
+      playwright:
+        type: boolean
+        default: false
+      playwright-browsers:
+        type: string
+        default: chromium
+      playwright-install-command:
+        type: string
+        default: ""
+      test-full-command:
+        type: string
+        default: ""
+        description: Slow suites (full and release stage)
+      e2e-command:
+        type: string
+        default: ""
+      build-command:
+        type: string
+        default: pnpm build
+      nuxt-build-cache:
+        type: boolean
+        default: false
+        description: Cache node_modules/.cache/nuxt between runs
+      supply-chain:
+        type: boolean
+        default: false
+        description: pnpm audit (+ image scan when image-build) in the verify job
+      audit-dirs:
+        type: string
+        default: "."
+      failure-artifact-path:
+        type: string
+        default: ""
+        description: Paths uploaded as "verify-failure" when the verify job fails
+      image-build:
+        type: boolean
+        default: false
+        description: Build the image and boot it (full stage, or every stage with image-on-fast)
+      image-on-fast:
+        type: boolean
+        default: false
+        description: Also build+smoke the image in the fast stage (catches Dockerfile breaks on PRs)
+      image-push:
+        type: boolean
+        default: false
+        description: >-
+          verify pushes the image untagged by digest and smoke-tests that exact digest; the image-push job
+          tags it after every other job passed. Never for fork pull requests (they build and load only)
+      image:
+        type: string
+        default: ""
+        description: Image name without tag; empty is ghcr.io/<owner>/<repo>
+      image-tags:
+        type: string
+        default: ""
+        description: Newline-separated tags (bare like main or full refs); empty is sha-<sha>
+      image-context:
+        type: string
+        default: "."
+      image-dockerfile:
+        type: string
+        default: ""
+      image-build-args:
+        type: string
+        default: ""
+        description: Extra build args; DEPLOYMENT_REVISION is always passed. Secrets go through BuildKit secret github_npm_token
+      image-platforms:
+        type: string
+        default: ""
+        description: Platforms for the pushed image, e.g. linux/amd64,linux/arm64; the smoke test pulls the runner platform
+      image-registry:
+        type: string
+        default: ghcr.io
+      image-provenance:
+        type: string
+        default: min
+      image-port:
+        type: number
+        default: 3000
+      image-health-path:
+        type: string
+        default: /api/health
+        description: Must answer {"status":"ok","revision":"<sha>"}
+      image-env:
+        type: string
+        default: ""
+        description: KEY=VALUE for the smoke container; empty uses env
+      image-run-args:
+        type: string
+        default: ""
+        description: Extra docker run args, one per line
+      image-smoke-command:
+        type: string
+        default: ""
+        description: Runs after the container is healthy, with SMOKE_URL
+      image-memory:
+        type: string
+        default: ""
+      extra-tests:
+        type: string
+        default: ""
+        description: JSON array of extra test jobs, see README
+      check-timeout-minutes:
+        type: number
+        default: 15
+      verify-timeout-minutes:
+        type: number
+        default: 30
+      extra-timeout-minutes:
+        type: number
+        default: 20
+    secrets:
+      packages-token:
+        required: false
+        description: Read token for npm.pkg.github.com and the BuildKit secret; falls back to github.token
+      env-secrets:
+        required: false
+        description: Multiline KEY=VALUE exported like env, values masked
+      registry-password:
+        required: false
+        description: Password for image-registry; falls back to github.token
+    outputs:
+      image-digest:
+        description: Digest of the pushed image
+        value: ${{ jobs.image-push.outputs.digest }}
+      image:
+        description: Pushed image pinned by digest (name@sha256:...)
+        value: ${{ jobs.image-push.outputs.image }}
+
+env:
+  NUXT_TELEMETRY_DISABLED: "1"
+
+jobs:
+  check:
+    name: ${{ matrix.part == 'all' && 'check' || matrix.part }}
+    if: inputs.lint-command != '' || inputs.typecheck-command != '' || inputs.test-command != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        part: ${{ fromJSON(inputs.parallel && '["lint","typecheck","test"]' || '["all"]') }}
+    runs-on: ${{ inputs.runner-light || (github.event.repository.private && vars.CI_RUNNER_LIGHT) || 'ubuntu-latest' }}
+    timeout-minutes: ${{ inputs.check-timeout-minutes }}
+    steps:
+      - name: Validate inputs
+        shell: bash
+        env:
+          STAGE: ${{ inputs.stage }}
+          CACHE: ${{ inputs.cache }}
+        run: |
+          set -euo pipefail
+          [[ "$STAGE" =~ ^(fast|full|release)$ ]] || { echo "::error::stage must be fast, full or release, got '$STAGE'"; exit 1; }
+          [[ "$CACHE" =~ ^(auto|off)$ ]] || { echo "::error::cache must be auto or off, got '$CACHE'"; exit 1; }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Start services
+        if: inputs.unit-services && (matrix.part == 'all' || matrix.part == 'test') && (inputs.postgres-version != '' || inputs.mailpit-version != '' || inputs.compose-file != '')
+        uses: $/.github/actions/services
+        with:
+          postgres-version: ${{ inputs.postgres-version }}
+          postgres-user: ${{ inputs.postgres-user }}
+          postgres-password: ${{ inputs.postgres-password }}
+          postgres-db: ${{ inputs.postgres-db }}
+          postgres-extra-databases: ${{ inputs.postgres-extra-databases }}
+          mailpit-version: ${{ inputs.mailpit-version }}
+          compose-file: ${{ inputs.compose-file }}
+
+      - uses: $/.github/actions/setup
+        with:
+          node-version: ${{ inputs.node-version }}
+          pnpm-version: ${{ inputs.pnpm-version }}
+          registry: ${{ inputs.registry }}
+          scope: ${{ inputs.registry-scope }}
+          token: ${{ secrets.packages-token }}
+          install-command: ${{ inputs.install-command }}
+          working-directory: ${{ inputs.install-directory }}
+          cache: ${{ inputs.cache }}
+
+      - name: Export env
+        uses: $/.github/actions/run
+        with:
+          env: ${{ inputs.env }}
+          env-secrets: ${{ secrets.env-secrets }}
+          export: "true"
+
+      - name: Prepare
+        if: inputs.prepare-command != ''
+        uses: $/.github/actions/run
+        with:
+          name: prepare
+          command: ${{ inputs.prepare-command }}
+          working-directory: ${{ inputs.working-directory }}
+
+      - name: Detect cache mode
+        id: cache
+        shell: bash
+        env:
+          CACHE: ${{ inputs.cache }}
+        run: echo "enabled=$([[ "$CACHE" != off && "${CI_LOCAL_CACHE:-}" != 1 ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore lint cache
+        if: inputs.lint-command != '' && inputs.lint-cache-path != '' && steps.cache.outputs.enabled == 'true' && (matrix.part == 'all' || matrix.part == 'lint')
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ inputs.working-directory }}/${{ inputs.lint-cache-path }}
+          key: lint-${{ runner.os }}-${{ inputs.working-directory }}-${{ github.sha }}
+          restore-keys: lint-${{ runner.os }}-${{ inputs.working-directory }}-
+
+      - name: Lint
+        if: inputs.lint-command != '' && (matrix.part == 'all' || matrix.part == 'lint')
+        uses: $/.github/actions/run
+        with:
+          name: lint
+          command: ${{ inputs.lint-command }}
+          working-directory: ${{ inputs.working-directory }}
+
+      - name: Typecheck
+        if: inputs.typecheck-command != '' && (matrix.part == 'all' || matrix.part == 'typecheck')
+        uses: $/.github/actions/run
+        with:
+          name: typecheck
+          command: ${{ inputs.typecheck-command }}
+          working-directory: ${{ inputs.working-directory }}
+
+      - name: Test
+        if: inputs.test-command != '' && (matrix.part == 'all' || matrix.part == 'test')
+        uses: $/.github/actions/run
+        with:
+          name: test
+          command: ${{ inputs.test-command }}
+          working-directory: ${{ inputs.working-directory }}
+
+      - name: Coverage report
+        if: always() && inputs.coverage-report && (matrix.part == 'all' || matrix.part == 'test')
+        uses: $/.github/actions/coverage
+        with:
+          working-directory: ${{ inputs.working-directory }}
+          json-summary: ${{ inputs.coverage-summary-paths }}
+
+  verify:
+    if: inputs.stage != 'fast' || (inputs.image-build && inputs.image-on-fast)
+    runs-on: ${{ inputs.runner-standard || (github.event.repository.private && vars.CI_RUNNER_STANDARD) || 'ubuntu-latest' }}
+    timeout-minutes: ${{ inputs.verify-timeout-minutes }}
+    env:
+      # false in the fast stage: only the image is built and booted.
+      CI_FULL: ${{ inputs.stage != 'fast' }}
+      # Same-repo with image-push: push once by digest and test exactly those bytes.
+      BY_DIGEST: >-
+        ${{ inputs.image-build && inputs.image-push
+        && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    outputs:
+      image: ${{ env.BY_DIGEST == 'true' && steps.image.outputs.image || '' }}
+      digest: ${{ env.BY_DIGEST == 'true' && steps.image.outputs.digest || '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Started once; the image smoke test reuses them (host network).
+      - name: Start services
+        id: services
+        if: inputs.postgres-version != '' || inputs.mailpit-version != '' || inputs.compose-file != ''
+        uses: $/.github/actions/services
+        with:
+          postgres-version: ${{ inputs.postgres-version }}
+          postgres-user: ${{ inputs.postgres-user }}
+          postgres-password: ${{ inputs.postgres-password }}
+          postgres-db: ${{ inputs.postgres-db }}
+          postgres-extra-databases: ${{ inputs.postgres-extra-databases }}
+          mailpit-version: ${{ inputs.mailpit-version }}
+          compose-file: ${{ inputs.compose-file }}
+
+      - name: Setup
+        if: env.CI_FULL == 'true'
+        uses: $/.github/actions/setup
+        with:
+          node-version: ${{ inputs.node-version }}
+          pnpm-version: ${{ inputs.pnpm-version }}
+          registry: ${{ inputs.registry }}
+          scope: ${{ inputs.registry-scope }}
+          token: ${{ secrets.packages-token }}
+          install-command: ${{ inputs.install-command }}
+          working-directory: ${{ inputs.install-directory }}
+          cache: ${{ inputs.cache }}
+
+      - name: Export env
+        uses: $/.github/actions/run
+        with:
+          env: ${{ inputs.env }}
+          env-secrets: ${{ secrets.env-secrets }}
+          export: "true"
+
+      - name: Prepare
+        if: env.CI_FULL == 'true' && inputs.prepare-command != ''
+        uses: $/.github/actions/run
+        with:
+          name: prepare
+          command: ${{ inputs.prepare-command }}
+          working-directory: ${{ inputs.working-directory }}
+
+      # Before migrate: proves migrate deploy on the still empty database.
+      - name: Prisma check
+        if: env.CI_FULL == 'true' && inputs.prisma-check != ''
+        uses: $/.github/actions/prisma-check
+        with:
+          level: ${{ inputs.prisma-check }}
+          database-url: ${{ env.DATABASE_URL || steps.services.outputs.database-url }}
+          schema: ${{ inputs.prisma-schema }}
+          migrations: ${{ inputs.prisma-migrations }}
+          working-directory: ${{ inputs.working-directory }}
+          require-transaction: ${{ inputs.prisma-require-transaction }}
+
+      - name: Migrate
+        if: env.CI_FULL == 'true' && inputs.migrate-command != ''
+        uses: $/.github/actions/run
+        with:
+          name: migrate
+          command: ${{ inputs.migrate-command }}
+          working-directory: ${{ inputs.working-directory }}
+
+      - name: Seed
+        if: env.CI_FULL == 'true' && inputs.seed-command != ''
+        uses: $/.github/actions/run
+        with:
+          name: seed
+          command: ${{ inputs.seed-command }}
+          working-directory: ${{ inputs.working-directory }}
+
+      - name: Detect cache mode
+        id: cache
+        shell: bash
+        env:
+          CACHE: ${{ inputs.cache }}
+        run: echo "enabled=$([[ "$CACHE" != off && "${CI_LOCAL_CACHE:-}" != 1 ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Nuxt build cache
+        if: env.CI_FULL == 'true' && inputs.nuxt-build-cache && steps.cache.outputs.enabled == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ inputs.working-directory }}/node_modules/.cache/nuxt
+          key: nuxt-build-${{ runner.os }}-${{ inputs.working-directory }}-${{ github.sha }}
+          restore-keys: nuxt-build-${{ runner.os }}-${{ inputs.working-directory }}-
+
+      - name: Playwright
+        if: env.CI_FULL == 'true' && inputs.playwright
+        uses: $/.github/actions/playwright
+        with:
+          working-directory: ${{ inputs.working-directory }}
+          browsers: ${{ inputs.playwright-browsers }}
+          install-command: ${{ inputs.playwright-install-command }}
+          cache: ${{ inputs.cache }}
+
+      - name: Test (full)
+        if: env.CI_FULL == 'true' && inputs.test-full-command != ''
+        uses: $/.github/actions/run
+        with:
+          name: test-full
+          command: ${{ inputs.test-full-command }}
+          working-directory: ${{ inputs.working-directory }}
+
+      - name: E2E
+        if: env.CI_FULL == 'true' && inputs.e2e-command != ''
+        uses: $/.github/actions/run
+        with:
+          name: e2e
+          command: ${{ inputs.e2e-command }}
+          working-directory: ${{ inputs.working-directory }}
+
+      - name: Build
+        if: env.CI_FULL == 'true' && inputs.build-command != ''
+        uses: $/.github/actions/run
+        with:
+          name: build
+          command: ${{ inputs.build-command }}
+          working-directory: ${{ inputs.working-directory }}
+
+      - name: Build image
+        id: image
+        if: inputs.image-build
+        uses: $/.github/actions/image-build
+        with:
+          context: ${{ inputs.image-context }}
+          dockerfile: ${{ inputs.image-dockerfile }}
+          image: ${{ inputs.image }}
+          # Digest pushes take no tags; image-push adds them after every job passed
+          tags: ${{ env.BY_DIGEST != 'true' && inputs.image-tags || '' }}
+          build-args: ${{ inputs.image-build-args }}
+          registry: ${{ inputs.image-registry }}
+          registry-password: ${{ secrets.registry-password || github.token }}
+          secret-token: ${{ secrets.packages-token || github.token }}
+          revision: ${{ github.sha }}
+          platforms: ${{ env.BY_DIGEST == 'true' && inputs.image-platforms || '' }}
+          provenance: ${{ inputs.image-provenance }}
+          push: "false"
+          push-by-digest: ${{ env.BY_DIGEST }}
+          load: ${{ env.BY_DIGEST != 'true' }}
+
+      - name: Pull the pushed digest
+        if: env.BY_DIGEST == 'true'
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+        run: docker pull "$IMAGE"
+
+      - name: Boot the image and prove the revision
+        if: inputs.image-build
+        uses: $/.github/actions/image-smoke
+        with:
+          image: ${{ steps.image.outputs.image }}
+          revision: ${{ github.sha }}
+          port: ${{ inputs.image-port }}
+          health-path: ${{ inputs.image-health-path }}
+          env: ${{ inputs.image-env || inputs.env }}
+          env-secrets: ${{ secrets.env-secrets }}
+          run-args: ${{ inputs.image-run-args }}
+          smoke-command: ${{ inputs.image-smoke-command }}
+          memory: ${{ inputs.image-memory }}
+
+      - name: Supply chain
+        if: env.CI_FULL == 'true' && inputs.supply-chain
+        uses: $/.github/actions/supply-chain
+        with:
+          audit-dirs: ${{ inputs.audit-dirs }}
+          image: ${{ steps.image.outputs.image }}
+
+      - name: Upload failure artifact
+        if: failure() && inputs.failure-artifact-path != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: verify-failure
+          path: ${{ inputs.failure-artifact-path }}
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # Tags the digest verify pushed and smoke-tested, only after every other job is green. No rebuild.
+  image-push:
+    needs: [check, verify, extra]
+    if: >-
+      !cancelled() && needs.verify.result == 'success' && needs.verify.outputs.image != ''
+      && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+      && inputs.image-build && inputs.image-push
+      && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ${{ inputs.runner-light || (github.event.repository.private && vars.CI_RUNNER_LIGHT) || 'ubuntu-latest' }}
+    timeout-minutes: ${{ inputs.verify-timeout-minutes }}
+    outputs:
+      digest: ${{ needs.verify.outputs.digest }}
+      image: ${{ needs.verify.outputs.image }}
+    steps:
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ inputs.image-registry }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.registry-password || github.token }}
+
+      - name: Tag the tested digest
+        shell: bash
+        env:
+          IMAGE: ${{ needs.verify.outputs.image }}
+          TAGS: ${{ inputs.image-tags }}
+          REVISION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          name="${IMAGE%@*}"
+          args=()
+          while IFS= read -r tag; do
+            tag="${tag//[[:space:]]/}"
+            [[ -n "$tag" ]] || continue
+            if [[ "$tag" == */* || "$tag" == *:* ]]; then args+=(-t "$tag"); else args+=(-t "${name}:${tag}"); fi
+          done <<< "$TAGS"
+          (( ${#args[@]} )) || args=(-t "${name}:sha-${REVISION}")
+          docker buildx imagetools create "${args[@]}" "$IMAGE"
+
+  # Inherits the caller's grant; a permissions block here would fail callers that grant less.
+  extra: # zizmor: ignore[excessive-permissions]
+    if: inputs.extra-tests != ''
+    uses: $/.github/workflows/extra-tests.yml
+    with:
+      tests: ${{ inputs.extra-tests }}
+      prepare-command: ${{ inputs.prepare-command }}
+      stage: ${{ inputs.stage }}
+      runner-light: ${{ inputs.runner-light }}
+      runner-standard: ${{ inputs.runner-standard }}
+      runner-arm64: ${{ inputs.runner-arm64 }}
+      runner-macos: ${{ inputs.runner-macos }}
+      working-directory: ${{ inputs.working-directory }}
+      install-directory: ${{ inputs.install-directory }}
+      node-version: ${{ inputs.node-version }}
+      pnpm-version: ${{ inputs.pnpm-version }}
+      registry: ${{ inputs.registry }}
+      registry-scope: ${{ inputs.registry-scope }}
+      install-command: ${{ inputs.install-command }}
+      cache: ${{ inputs.cache }}
+      env: ${{ inputs.env }}
+      postgres-version: ${{ inputs.postgres-version }}
+      postgres-user: ${{ inputs.postgres-user }}
+      postgres-password: ${{ inputs.postgres-password }}
+      postgres-db: ${{ inputs.postgres-db }}
+      postgres-extra-databases: ${{ inputs.postgres-extra-databases }}
+      mailpit-version: ${{ inputs.mailpit-version }}
+      compose-file: ${{ inputs.compose-file }}
+      playwright-browsers: ${{ inputs.playwright-browsers }}
+      playwright-install-command: ${{ inputs.playwright-install-command }}
+      timeout-minutes: ${{ inputs.extra-timeout-minutes }}
+    secrets:
+      packages-token: ${{ secrets.packages-token }}
+      env-secrets: ${{ secrets.env-secrets }}

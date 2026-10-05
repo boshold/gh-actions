@@ -1,0 +1,33 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directories:
+      - /
+      - /.github/actions/*
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directories:
+      - /preview-placeholder
+      - /tests/image-smoke/fixture
+      - /tests/fixtures/app
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: npm
+    directory: /tests/prisma-check/fixture
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      prisma:
+        patterns: ["*"]

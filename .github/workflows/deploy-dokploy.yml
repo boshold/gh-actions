@@ -1,0 +1,236 @@
+name: Deploy to Dokploy
+
+# Reusable deployment of an already built image: record a GitHub deployment, point the Dokploy
+# application at the image, prove the running revision (rollback with health check otherwise) and
+# report back. Never builds: deploy the digest CI or release-image produced.
+# Callers grant contents: read and deployments: write. One deployment per application at a time.
+# The job declares no `environment:`, so GitHub environment protection rules (reviewers, branch
+# limits) do not apply here; the caller passes the Dokploy secret. Gate production in the caller,
+# e.g. with an environment on a job this one needs.
+# With preview-pr set, callers also grant pull-requests: read.
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+        description: preview, stage or production
+      project:
+        type: string
+        required: true
+        description: Project name, used in the Dokploy deployment title
+      image:
+        type: string
+        required: true
+        description: Image to deploy, ideally pinned by digest
+      revision:
+        type: string
+        required: true
+        description: Full commit sha the health endpoint must report
+      health-url:
+        type: string
+        required: true
+        description: Endpoint returning {"status":"ok","revision":"<sha>"}
+      environment-url:
+        type: string
+        default: ""
+        description: Shown on the GitHub deployment; empty is the health URL's origin
+      application-id:
+        type: string
+        required: true
+        description: Dokploy application id for this environment
+      dokploy-url:
+        type: string
+        required: true
+      backup-schedule-id:
+        type: string
+        default: ""
+        description: Dokploy schedule run before the image changes; required for production
+      initial-image:
+        type: string
+        default: ""
+        description: Bootstrap image allowing a first production release without a backup
+      skip-backup:
+        type: boolean
+        default: false
+        description: Break glass; production deploys without a backup (logs a warning)
+      require-backup:
+        type: boolean
+        default: true
+        description: false skips the production backup requirement (apps without a database)
+      rollback:
+        type: boolean
+        default: true
+      mode:
+        type: string
+        default: deploy
+        description: deploy, placeholder (preview only) or stop
+      description:
+        type: string
+        default: ""
+        description: Dokploy deployment description; empty is the run URL
+      preview-pr:
+        type: string
+        default: ""
+        description: >-
+          Preview slot pull request number. When set, the job first checks (under the Dokploy lock) that
+          this PR still owns the slot, or for placeholder mode that no PR does, and skips otherwise
+      preview-head-sha:
+        type: string
+        default: ""
+        description: Head sha the preview PR must still have (deploy mode)
+      preview-label:
+        type: string
+        default: preview
+        description: Label that owns the preview slot
+      wait-minutes:
+        type: number
+        default: 10
+        description: Budget for each wait (deployment, health)
+      runner:
+        type: string
+        default: ""
+      timeout-minutes:
+        type: number
+        default: 30
+    secrets:
+      dokploy-api-key:
+        required: true
+    outputs:
+      previous-image:
+        value: ${{ jobs.deploy.outputs.previous-image }}
+      rolled-back:
+        value: ${{ jobs.deploy.outputs.rolled-back }}
+
+jobs:
+  deploy:
+    runs-on: ${{ inputs.runner || (github.event.repository.private && vars.CI_RUNNER_LIGHT) || 'ubuntu-latest' }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    concurrency:
+      group: dokploy-${{ inputs.application-id }}
+      cancel-in-progress: false
+    outputs:
+      previous-image: ${{ steps.deploy.outputs.previous-image }}
+      rolled-back: ${{ steps.deploy.outputs.rolled-back }}
+    steps:
+
+      - name: Validate inputs
+        id: inputs
+        shell: bash
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          MODE: ${{ inputs.mode }}
+          HEALTH_URL: ${{ inputs.health-url }}
+          ENVIRONMENT_URL: ${{ inputs.environment-url }}
+          WAIT_MINUTES: ${{ inputs.wait-minutes }}
+          PREVIEW_PR: ${{ inputs.preview-pr }}
+          PREVIEW_HEAD_SHA: ${{ inputs.preview-head-sha }}
+        run: |
+          set -euo pipefail
+          [[ "$MODE" =~ ^(deploy|placeholder|stop)$ ]] || { echo "::error::mode must be deploy, placeholder or stop"; exit 1; }
+          if [[ -n "$PREVIEW_PR" ]]; then
+            [[ "$PREVIEW_PR" =~ ^[1-9][0-9]*$ ]] || { echo "::error::preview-pr must be a pull request number"; exit 1; }
+            [[ "$MODE" == placeholder || "$PREVIEW_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] \
+              || { echo "::error::preview-head-sha must be a full commit sha"; exit 1; }
+          fi
+          [[ "$HEALTH_URL" =~ ^(https?://[^/]+) ]] || { echo "::error::health-url must be an http(s) URL"; exit 1; }
+          echo "environment-url=${ENVIRONMENT_URL:-${BASH_REMATCH[1]}}" >> "$GITHUB_OUTPUT"
+          echo "wait-ms=$((WAIT_MINUTES * 60000))" >> "$GITHUB_OUTPUT"
+
+      # Re-checked under the Dokploy lock: the slot may have moved while this run built its image.
+      - name: Check the preview slot
+        id: slot
+        if: inputs.preview-pr != ''
+        uses: $/.github/actions/preview-slot
+        with:
+          mode: ${{ inputs.mode == 'placeholder' && 'check-idle' || 'check' }}
+          pr: ${{ inputs.preview-pr }}
+          head-sha: ${{ inputs.preview-head-sha }}
+          label: ${{ inputs.preview-label }}
+          token: ${{ github.token }}
+
+      - name: Skip a stale preview
+        if: steps.slot.outputs.owner == 'false'
+        shell: bash
+        env:
+          MODE: ${{ inputs.mode }}
+          PREVIEW_PR: ${{ inputs.preview-pr }}
+        run: |
+          if [[ "$MODE" == placeholder ]]; then
+            echo "::notice::A pull request owns the preview slot again; placeholder not restored"
+          else
+            echo "::notice::PR #$PREVIEW_PR no longer owns the preview slot at this head; deploy skipped"
+          fi
+
+      - name: Record the deployment
+        id: record
+        if: steps.slot.outputs.owner != 'false'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          REVISION: ${{ inputs.revision }}
+          MODE: ${{ inputs.mode }}
+        with:
+          script: |
+            const environment = process.env.ENVIRONMENT
+            const { data } = await github.rest.repos.createDeployment({
+              ...context.repo,
+              ref: process.env.REVISION,
+              environment,
+              auto_merge: false,
+              required_contexts: [],
+              production_environment: environment === 'production',
+              transient_environment: environment === 'preview',
+              description: `${process.env.MODE} via Dokploy`,
+            })
+            if (!data.id) throw new Error(`deployment not created: ${data.message ?? 'unknown reason'}`)
+            await github.rest.repos.createDeploymentStatus({
+              ...context.repo,
+              deployment_id: data.id,
+              state: 'in_progress',
+              log_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            })
+            core.setOutput('id', String(data.id))
+
+      - name: Deploy
+        id: deploy
+        if: steps.slot.outputs.owner != 'false'
+        uses: $/.github/actions/dokploy-deploy
+        with:
+          dokploy-url: ${{ inputs.dokploy-url }}
+          api-key: ${{ secrets.dokploy-api-key }}
+          application-id: ${{ inputs.application-id }}
+          project: ${{ inputs.project }}
+          environment: ${{ inputs.environment }}
+          image: ${{ inputs.image }}
+          revision: ${{ inputs.revision }}
+          health-url: ${{ inputs.health-url }}
+          description: ${{ inputs.description || format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}
+          backup-schedule-id: ${{ inputs.backup-schedule-id }}
+          initial-image: ${{ inputs.initial-image }}
+          skip-backup: ${{ inputs.skip-backup }}
+          require-backup: ${{ inputs.require-backup }}
+          rollback: ${{ inputs.rollback }}
+          timeout-ms: ${{ steps.inputs.outputs.wait-ms }}
+          mode: ${{ inputs.mode }}
+
+      - name: Report the result
+        if: always() && steps.record.outputs.id != ''
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          DEPLOYMENT_ID: ${{ steps.record.outputs.id }}
+          OUTCOME: ${{ steps.deploy.outcome }}
+          MODE: ${{ inputs.mode }}
+          ENVIRONMENT_URL: ${{ steps.inputs.outputs.environment-url }}
+        with:
+          script: |
+            const ok = process.env.OUTCOME === 'success'
+            await github.rest.repos.createDeploymentStatus({
+              ...context.repo,
+              deployment_id: Number(process.env.DEPLOYMENT_ID),
+              state: ok ? (process.env.MODE === 'stop' ? 'inactive' : 'success') : 'failure',
+              environment_url: process.env.ENVIRONMENT_URL,
+              log_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              auto_inactive: ok,
+            })

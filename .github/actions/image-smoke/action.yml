@@ -1,0 +1,69 @@
+name: Image smoke
+description: >-
+  Boots an image and requires its health path to answer JSON {status, revision} with the revision
+  baked in at build time, then runs an optional smoke command.
+
+inputs:
+  image:
+    description: Image reference; pulled unless already local
+    required: true
+  revision:
+    description: Revision the health answer must report
+    required: true
+  port:
+    description: Port the app listens on (host network)
+    default: "3000"
+  health-path:
+    default: /api/health
+  health-status:
+    description: Required value of .status in the health answer
+    default: ok
+  env:
+    description: Newline-separated KEY=VALUE for the container
+    default: ""
+  env-secrets:
+    description: Like env, values masked
+    default: ""
+  run-args:
+    description: Extra docker run arguments, one argument per line
+    default: ""
+  smoke-command:
+    description: Command run once healthy, with SMOKE_URL (http://127.0.0.1:<port>) and SMOKE_CONTAINER set
+    default: ""
+  memory:
+    description: Container memory limit, e.g. 512m
+    default: ""
+  tries:
+    default: "45"
+  interval:
+    description: Seconds between health tries
+    default: "2"
+  inject-revision:
+    description: Add DEPLOYMENT_REVISION=<revision> to the env (makes the revision check meaningless; only for images that read it at runtime)
+    default: "false"
+
+outputs:
+  body:
+    description: Health answer
+    value: ${{ steps.smoke.outputs.body }}
+
+runs:
+  using: composite
+  steps:
+    - id: smoke
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        REVISION: ${{ inputs.revision }}
+        PORT: ${{ inputs.port }}
+        HEALTH_PATH: ${{ inputs.health-path }}
+        HEALTH_STATUS: ${{ inputs.health-status }}
+        ENV_INPUT: ${{ inputs.env }}
+        ENV_SECRETS: ${{ inputs.env-secrets }}
+        RUN_ARGS: ${{ inputs.run-args }}
+        SMOKE_COMMAND: ${{ inputs.smoke-command }}
+        MEMORY: ${{ inputs.memory }}
+        TRIES: ${{ inputs.tries }}
+        INTERVAL: ${{ inputs.interval }}
+        INJECT_REVISION: ${{ inputs.inject-revision }}
+      run: bash "$GITHUB_ACTION_PATH/smoke.sh"

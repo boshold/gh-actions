@@ -1,0 +1,62 @@
+name: Playwright
+description: Installs Playwright browsers with a cache keyed on the resolved Playwright version.
+
+inputs:
+  working-directory:
+    description: Directory whose node_modules resolve @playwright/test or playwright
+    default: "."
+  browsers:
+    description: Space-separated browsers
+    default: chromium
+  cli:
+    description: Playwright CLI invocation
+    default: pnpm exec playwright
+  install-command:
+    description: Custom install command run instead of the default install/install-deps (always runs)
+    default: ""
+  cache:
+    description: auto (GitHub cache unless CI_LOCAL_CACHE=1 on the runner) or off
+    default: auto
+
+outputs:
+  version:
+    description: Resolved Playwright version
+    value: ${{ steps.resolve.outputs.version }}
+  cache-hit:
+    value: ${{ steps.cache.outputs.cache-hit == 'true' }}
+
+runs:
+  using: composite
+  steps:
+    - id: resolve
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        CACHE: ${{ inputs.cache }}
+        BROWSERS: ${{ inputs.browsers }}
+      run: bash "$GITHUB_ACTION_PATH/resolve.sh"
+
+    - id: cache
+      if: steps.resolve.outputs.cache == 'true'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.resolve.outputs.path }}
+        key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve.outputs.version }}-${{ steps.resolve.outputs.browsers-key }}
+
+    - name: Install browsers
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        CLI: ${{ inputs.cli }}
+        CMD: ${{ inputs.install-command }}
+        BROWSERS: ${{ inputs.browsers }}
+        CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+      run: |
+        set -euo pipefail
+        if [[ -n "$CMD" ]]; then
+          bash -euo pipefail -c "$CMD"
+        elif [[ "$CACHE_HIT" == true ]]; then
+          bash -euo pipefail -c "$CLI install-deps $BROWSERS"
+        else
+          bash -euo pipefail -c "$CLI install --with-deps $BROWSERS"
+        fi

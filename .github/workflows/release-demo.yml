@@ -1,0 +1,276 @@
+name: Release demo
+
+# Reusable demo release for npm modules: build the demo image from the release commit (resumes the
+# version the package release created), boot it, scan it, push it, deploy it to Dokploy and stop it
+# again until a visitor wakes it. Composes release-image.yml and deploy-dokploy.yml ($/ = same
+# repository and commit as this workflow).
+# Run as a job that needs the package release job. Callers grant contents: write, packages: write
+# and deployments: write. A dry run stops after the scan.
+
+on:
+  workflow_call:
+    inputs:
+      bump:
+        type: string
+        required: true
+        description: patch, minor, major, prerelease, prepatch, preminor or premajor
+      preid:
+        type: string
+        default: rc
+      dry-run:
+        type: boolean
+        default: false
+        description: Bump, build, smoke and scan; push and release nothing
+      version-files:
+        type: string
+        default: ""
+        description: Newline-separated extra files carrying the version, e.g. Cargo.toml
+      working-directory:
+        type: string
+        default: "."
+        description: Directory holding the root package.json for the version bump
+      image:
+        type: string
+        default: ""
+        description: Image name without tag; empty is ghcr.io/<owner>/<repo>-demo
+      registry:
+        type: string
+        default: ghcr.io
+      context:
+        type: string
+        default: "."
+      dockerfile:
+        type: string
+        default: playground/Dockerfile
+      build-args:
+        type: string
+        default: ""
+        description: Extra build args; DEPLOYMENT_REVISION and APP_VERSION are always passed. Secrets go through BuildKit secret github_npm_token
+      platforms:
+        type: string
+        default: ""
+        description: Platforms for the push, e.g. linux/amd64,linux/arm64; smoke and scan use the runner platform
+      provenance:
+        type: string
+        default: min
+        description: min, max (exposes build args) or false
+      latest:
+        type: string
+        default: auto
+        description: Move the latest tag; auto = only for the highest stable version
+      port:
+        type: number
+        default: 3000
+      health-path:
+        type: string
+        default: /api/health
+        description: Must answer {"status":"ok","revision":"<sha>"}
+      smoke-env:
+        type: string
+        default: ""
+        description: KEY=VALUE for the smoke container
+      smoke-run-args:
+        type: string
+        default: ""
+        description: Extra docker run args, one per line, e.g. --volume=/data
+      smoke-command:
+        type: string
+        default: ""
+        description: Runs after the container is healthy, with SMOKE_URL
+      smoke-memory:
+        type: string
+        default: ""
+      postgres-version:
+        type: string
+        default: ""
+      postgres-user:
+        type: string
+        default: postgres
+      postgres-password:
+        type: string
+        default: postgres
+      postgres-db:
+        type: string
+        default: postgres
+      postgres-extra-databases:
+        type: string
+        default: ""
+      mailpit-version:
+        type: string
+        default: ""
+      compose-file:
+        type: string
+        default: ""
+      scan:
+        type: boolean
+        default: true
+        description: Fail on fixable HIGH/CRITICAL vulnerabilities and attach an SBOM to the release
+      environment:
+        type: string
+        default: production
+        description: preview, stage or production
+      project:
+        type: string
+        required: true
+        description: Project name, used in the Dokploy deployment title
+      health-url:
+        type: string
+        required: true
+        description: Endpoint returning {"status":"ok","revision":"<sha>"}
+      environment-url:
+        type: string
+        default: ""
+        description: Shown on the GitHub deployment; empty is the health URL's origin
+      application-id:
+        type: string
+        required: true
+        description: Dokploy application id for this environment
+      dokploy-url:
+        type: string
+        required: true
+      require-backup:
+        type: boolean
+        default: false
+        description: Demos usually have no database worth a backup
+      rollback:
+        type: boolean
+        default: true
+      description:
+        type: string
+        default: ""
+        description: Dokploy deployment description; empty is the run URL
+      wait-minutes:
+        type: number
+        default: 10
+        description: Budget for each wait (deployment, health)
+      stop-after-deploy:
+        type: boolean
+        default: true
+        description: Stop the application after a healthy deploy (demos started on demand)
+      runner:
+        type: string
+        default: ""
+      image-timeout-minutes:
+        type: number
+        default: 30
+      deploy-timeout-minutes:
+        type: number
+        default: 20
+    secrets:
+      packages-token:
+        required: false
+        description: BuildKit secret github_npm_token; falls back to github.token
+      release-token:
+        required: false
+        description: Push token for protected branches (only used when the version was not pushed yet)
+      registry-password:
+        required: false
+      smoke-env-secrets:
+        required: false
+      dokploy-api-key:
+        required: true
+    outputs:
+      version:
+        value: ${{ jobs.image.outputs.version }}
+      sha:
+        description: The release commit, which the image reports as its revision
+        value: ${{ jobs.image.outputs.sha }}
+      image:
+        description: Image pinned by digest
+        value: ${{ jobs.image.outputs.image }}
+
+jobs:
+  image:
+    uses: $/.github/workflows/release-image.yml
+    permissions:
+      contents: write
+      packages: write
+    with:
+      bump: ${{ inputs.bump }}
+      preid: ${{ inputs.preid }}
+      dry-run: ${{ inputs.dry-run }}
+      version-files: ${{ inputs.version-files }}
+      working-directory: ${{ inputs.working-directory }}
+      image: ${{ inputs.image || format('{0}/{1}-demo', inputs.registry, github.repository) }}
+      registry: ${{ inputs.registry }}
+      context: ${{ inputs.context }}
+      dockerfile: ${{ inputs.dockerfile }}
+      build-args: ${{ inputs.build-args }}
+      platforms: ${{ inputs.platforms }}
+      provenance: ${{ inputs.provenance }}
+      latest: ${{ inputs.latest }}
+      # The package release owns the GitHub "latest" flag; the SBOM is named after the -demo image.
+      make-latest: ${{ 'false' }} # zizmor: ignore[obfuscation] actionlint types a plain "false" as bool
+      port: ${{ inputs.port }}
+      health-path: ${{ inputs.health-path }}
+      smoke-env: ${{ inputs.smoke-env }}
+      smoke-run-args: ${{ inputs.smoke-run-args }}
+      smoke-command: ${{ inputs.smoke-command }}
+      smoke-memory: ${{ inputs.smoke-memory }}
+      postgres-version: ${{ inputs.postgres-version }}
+      postgres-user: ${{ inputs.postgres-user }}
+      postgres-password: ${{ inputs.postgres-password }}
+      postgres-db: ${{ inputs.postgres-db }}
+      postgres-extra-databases: ${{ inputs.postgres-extra-databases }}
+      mailpit-version: ${{ inputs.mailpit-version }}
+      compose-file: ${{ inputs.compose-file }}
+      scan: ${{ inputs.scan }}
+      runner: ${{ inputs.runner }}
+      timeout-minutes: ${{ inputs.image-timeout-minutes }}
+    secrets:
+      packages-token: ${{ secrets.packages-token }}
+      release-token: ${{ secrets.release-token }}
+      registry-password: ${{ secrets.registry-password }}
+      smoke-env-secrets: ${{ secrets.smoke-env-secrets }}
+
+  deploy:
+    needs: image
+    if: ${{ !inputs.dry-run }}
+    uses: $/.github/workflows/deploy-dokploy.yml
+    permissions:
+      contents: read
+      deployments: write
+    with:
+      environment: ${{ inputs.environment }}
+      project: ${{ inputs.project }}
+      image: ${{ needs.image.outputs.image }}
+      revision: ${{ needs.image.outputs.sha }}
+      health-url: ${{ inputs.health-url }}
+      environment-url: ${{ inputs.environment-url }}
+      application-id: ${{ inputs.application-id }}
+      dokploy-url: ${{ inputs.dokploy-url }}
+      require-backup: ${{ inputs.require-backup }}
+      rollback: ${{ inputs.rollback }}
+      description: ${{ inputs.description }}
+      wait-minutes: ${{ inputs.wait-minutes }}
+      runner: ${{ inputs.runner }}
+      timeout-minutes: ${{ inputs.deploy-timeout-minutes }}
+    secrets:
+      dokploy-api-key: ${{ secrets.dokploy-api-key }}
+
+  # Not through deploy-dokploy.yml, which would record a second GitHub deployment.
+  stop:
+    needs: [image, deploy]
+    if: ${{ !inputs.dry-run && inputs.stop-after-deploy }}
+    runs-on: ${{ inputs.runner || (github.event.repository.private && vars.CI_RUNNER_LIGHT) || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    concurrency:
+      group: dokploy-${{ inputs.application-id }}
+      cancel-in-progress: false
+    steps:
+      # Stop mode still validates every deploy input.
+      - name: Stop the demo
+        uses: $/.github/actions/dokploy-deploy
+        with:
+          dokploy-url: ${{ inputs.dokploy-url }}
+          api-key: ${{ secrets.dokploy-api-key }}
+          application-id: ${{ inputs.application-id }}
+          project: ${{ inputs.project }}
+          environment: ${{ inputs.environment }}
+          image: ${{ needs.image.outputs.image }}
+          revision: ${{ needs.image.outputs.sha }}
+          health-url: ${{ inputs.health-url }}
+          require-backup: "false"
+          mode: stop

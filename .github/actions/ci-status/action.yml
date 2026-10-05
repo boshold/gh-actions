@@ -1,0 +1,23 @@
+name: CI status
+description: Reports whether a workflow already completed successfully on a commit, so a release can reuse green CI.
+
+inputs:
+  workflow:
+    description: Workflow file name, e.g. ci.yml
+    required: true
+  sha:
+    description: Commit sha; defaults to GITHUB_SHA
+    default: ""
+  token:
+    description: Token with actions read
+    default: ${{ github.token }}
+
+outputs:
+  passed:
+    description: true when a successful run exists
+  run-id:
+    description: Id of that run, empty otherwise
+
+runs:
+  using: node24
+  main: index.mjs

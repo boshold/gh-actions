@@ -1,0 +1,67 @@
+name: Dokploy deploy
+description: >-
+  Points a Dokploy application at an image, waits for the deployment and for the application to report that
+  exact revision, and puts the previous image back (and verifies it answers) when it does not.
+
+inputs:
+  dokploy-url:
+    description: Base URL of the Dokploy instance
+    required: true
+  api-key:
+    description: Dokploy API key for this environment
+    required: true
+  application-id:
+    description: Dokploy application id of the target environment
+    required: true
+  project:
+    description: Project name, used in the deployment title
+    required: true
+  environment:
+    description: preview, stage or production
+    required: true
+  image:
+    description: Image reference to deploy, ideally pinned by digest
+    required: true
+  revision:
+    description: Full commit sha the health endpoint must report
+    required: true
+  health-url:
+    description: Endpoint returning {"status":"ok","revision":"<sha>"}
+    required: true
+  description:
+    description: Shown on the Dokploy deployment; defaults to "Revision <sha>"
+    default: ""
+  backup-schedule-id:
+    description: Dokploy schedule run before the image changes; required for production
+    default: ""
+  initial-image:
+    description: Allow a first production release without a backup only when the app is idle on this bootstrap image
+    default: ""
+  skip-backup:
+    description: Break glass. true lets production deploy without a backup schedule; logs a warning
+    default: "false"
+  require-backup:
+    description: false skips the production backup requirement, for applications without a database
+    default: "true"
+  rollback:
+    description: Put the previous image back when the release does not become healthy
+    default: "true"
+  timeout-ms:
+    description: Budget for each wait (backup, deployment, health), in milliseconds
+    default: "600000"
+  poll-ms:
+    description: Poll interval, in milliseconds
+    default: "5000"
+  mode:
+    description: deploy, placeholder or stop. Placeholder requires a preview image returning {"status":"idle"} from the health URL.
+    default: deploy
+
+outputs:
+  previous-image:
+    description: Image the application ran before this deploy
+  rolled-back:
+    description: true when the previous image was restored and answers its health check
+
+runs:
+  using: node24
+  main: index.mjs

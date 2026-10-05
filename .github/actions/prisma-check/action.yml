@@ -1,0 +1,75 @@
+name: Prisma check
+description: >-
+  Verifies Prisma migrations: they deploy on an empty database and cover the schema (no drift).
+  Higher levels also guard merged migrations, the migration_lock.toml provider and destructive SQL.
+  Needs Prisma 7 (prisma.config.ts), an installed project, git history reachable via origin, jq,
+  and Node 24 (node:sqlite proves that SQLite table rebuilds keep every column).
+
+inputs:
+  level:
+    description: >-
+      basic = deploy + drift; standard = basic + merged migrations unchanged, lock provider,
+      destructive SQL as warning; strict = standard with destructive SQL as error
+    default: standard
+  database-url:
+    description: Empty database the migrations are deployed to, e.g. postgresql://… or file:./ci.db
+    required: true
+  schema:
+    description: Schema file or folder; must be the one prisma.config.ts selects for database-url
+    default: prisma/schema.prisma
+  migrations:
+    description: Migrations folder; must be the one prisma.config.ts selects for database-url
+    default: prisma/migrations
+  working-directory:
+    default: "."
+  prisma-command:
+    description: Prisma CLI invocation
+    default: pnpm exec prisma
+  base-ref:
+    description: >-
+      Commit or branch to compare against; empty skips the base checks. Default: the PR base SHA
+      from the event (stable across re-runs), on push to the default branch the previous tip,
+      other pushes skip the base checks (the PR run covers them)
+    default: ${{ github.event.pull_request.base.sha || (github.ref_name == github.event.repository.default_branch && github.event.before) || '' }}
+  allow-destructive-label:
+    description: >-
+      PR label that turns destructive SQL errors (strict) into a pass. The caller must trigger on
+      pull_request type labeled for a new label to take effect
+    default: migration:destructive
+  require-transaction:
+    description: New migrations must contain BEGIN; and COMMIT;
+    default: "false"
+  fail-on-unknown-base:
+    description: >-
+      Fail when the base cannot be determined (no base on a pull request, or the base ref cannot be
+      fetched) instead of skipping the base checks. Empty is true at strict, false otherwise
+    default: ""
+  token:
+    description: Token for fetching the base commit when the checkout kept no credentials
+    default: ${{ github.token }}
+
+outputs:
+  drift:
+    description: true when the schema has changes no migration covers, false when clean, empty when not checked
+    value: ${{ steps.check.outputs.drift }}
+
+runs:
+  using: composite
+  steps:
+    - name: Prisma check
+      id: check
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        LEVEL: ${{ inputs.level }}
+        DATABASE_URL: ${{ inputs.database-url }}
+        SCHEMA: ${{ inputs.schema }}
+        MIGRATIONS: ${{ inputs.migrations }}
+        PRISMA_COMMAND: ${{ inputs.prisma-command }}
+        BASE_REF: ${{ inputs.base-ref }}
+        ALLOW_DESTRUCTIVE_LABEL: ${{ inputs.allow-destructive-label }}
+        PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        REQUIRE_TRANSACTION: ${{ inputs.require-transaction }}
+        FAIL_ON_UNKNOWN_BASE: ${{ inputs.fail-on-unknown-base }}
+        FETCH_TOKEN: ${{ inputs.token }}
+      run: bash "$GITHUB_ACTION_PATH/check.sh"

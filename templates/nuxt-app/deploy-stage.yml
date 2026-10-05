@@ -1,0 +1,48 @@
+name: Deploy stage
+
+# Every push to main: full CI, push the tested image, deploy that digest to stage.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-stage
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: $/.github/workflows/ci.yml
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: write
+    with:
+      stage: full
+      image-push: true
+      image-tags: |
+        main
+        sha-${{ github.sha }}
+    secrets:
+      PACKAGES_READ_TOKEN: ${{ secrets.PACKAGES_READ_TOKEN }}
+
+  deploy:
+    needs: ci
+    uses: boshold/gh-actions-public/.github/workflows/deploy-dokploy.yml@v1
+    permissions:
+      contents: read
+      deployments: write
+    with:
+      environment: stage
+      project: my-app
+      image: ${{ needs.ci.outputs.image }}
+      revision: ${{ github.sha }}
+      health-url: https://stage.example.com/api/health
+      application-id: ${{ vars.DOKPLOY_APPLICATION_ID_STAGE }}
+      dokploy-url: ${{ vars.DOKPLOY_URL }}
+    secrets:
+      dokploy-api-key: ${{ secrets.DOKPLOY_API_KEY_STAGE }}

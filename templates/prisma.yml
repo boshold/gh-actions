@@ -1,0 +1,45 @@
+name: Prisma
+
+# Migration checks only when the schema or migrations change. Label a PR "migration:destructive"
+# to accept destructive SQL at level strict; removing the label re-runs the check.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    paths:
+      - prisma/**
+      - prisma.config.ts
+      - package.json
+      - pnpm-lock.yaml
+      - .github/workflows/prisma.yml
+  push:
+    branches: [main]
+    paths:
+      - prisma/**
+      - prisma.config.ts
+      - .github/workflows/prisma.yml
+
+concurrency:
+  group: prisma-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  prisma:
+    if: >-
+      (github.event.action != 'labeled' && github.event.action != 'unlabeled')
+      || github.event.label.name == 'migration:destructive'
+    uses: boshold/gh-actions-public/.github/workflows/prisma-check.yml@v1
+    with:
+      level: strict
+      prepare-command: pnpm exec prisma generate
+      # One target per database; with two or more the migration folders must match.
+      targets: |
+        [{"name": "postgres", "postgres-version": "18"}]
+      # [{"name": "postgres", "postgres-version": "18"},
+      #  {"name": "sqlite", "database-url": "file:./ci.db", "schema": "prisma/sqlite/schema.prisma", "migrations": "prisma/sqlite/migrations"}]
+    secrets:
+      packages-token: ${{ secrets.PACKAGES_READ_TOKEN }}

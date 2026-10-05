@@ -1,0 +1,89 @@
+name: Supply chain
+description: Opt-in dependency audit (pnpm audit per directory), Trivy filesystem/image scan and SBOM.
+
+inputs:
+  audit-dirs:
+    description: Newline-separated directories for pnpm audit; empty skips the audit
+    default: "."
+  audit-level:
+    description: pnpm audit level (low, moderate, high, critical)
+    default: high
+  audit-prod:
+    description: Audit production dependencies only
+    default: "false"
+  trivy-fs:
+    description: Trivy scan of the repository filesystem
+    default: "false"
+  image:
+    description: Image reference to scan with Trivy (local or pullable); empty skips
+    default: ""
+  severity:
+    description: Trivy severities that fail the scan
+    default: HIGH,CRITICAL
+  sbom:
+    description: Write an SPDX JSON SBOM (of image when set, else the filesystem) to sbom-path
+    default: "false"
+  sbom-path:
+    default: sbom.spdx.json
+  registry-username:
+    description: For pulling a private image; empty is github.actor
+    default: ""
+  registry-password:
+    description: For pulling a private image; empty is github.token
+    default: ""
+
+outputs:
+  sbom-path:
+    value: ${{ inputs.sbom == 'true' && inputs.sbom-path || '' }}
+
+runs:
+  using: composite
+  steps:
+    - name: pnpm audit
+      if: inputs.audit-dirs != ''
+      shell: bash
+      env:
+        AUDIT_DIRS: ${{ inputs.audit-dirs }}
+        AUDIT_LEVEL: ${{ inputs.audit-level }}
+        AUDIT_PROD: ${{ inputs.audit-prod }}
+      run: bash "$GITHUB_ACTION_PATH/audit.sh"
+
+    - name: Trivy filesystem scan
+      if: inputs.trivy-fs == 'true'
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      with:
+        scan-type: fs
+        scan-ref: .
+        scanners: vuln,secret
+        severity: ${{ inputs.severity }}
+        ignore-unfixed: true
+        format: table
+        exit-code: "1"
+
+    - name: Trivy image scan
+      if: inputs.image != ''
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      env:
+        TRIVY_USERNAME: ${{ inputs.registry-username || github.actor }}
+        TRIVY_PASSWORD: ${{ inputs.registry-password || github.token }}
+      with:
+        image-ref: ${{ inputs.image }}
+        scanners: vuln
+        severity: ${{ inputs.severity }}
+        ignore-unfixed: true
+        format: table
+        exit-code: "1"
+
+    - name: SBOM
+      if: inputs.sbom == 'true'
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      env:
+        TRIVY_USERNAME: ${{ inputs.registry-username || github.actor }}
+        TRIVY_PASSWORD: ${{ inputs.registry-password || github.token }}
+      with:
+        scan-type: ${{ inputs.image != '' && 'image' || 'fs' }}
+        image-ref: ${{ inputs.image }}
+        scan-ref: ${{ inputs.image == '' && '.' || '' }}
+        format: spdx-json
+        output: ${{ inputs.sbom-path }}
+        exit-code: "0"

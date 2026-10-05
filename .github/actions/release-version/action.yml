@@ -1,0 +1,40 @@
+name: Release version
+description: >-
+  Computes the next version from the highest vX.Y.Z tag, writes it into every workspace manifest and the extra
+  files, then commits and tags locally (no push). Needs full history. Resume and promotion rules (GITHUB_SHA is the
+  tested commit): a tag on HEAD whose parent is GITHUB_SHA, or a tag on GITHUB_SHA equal to what this bump gives,
+  is resumed. A tagged prerelease HEAD with a stable bump is promoted (new commit if files change, else a second
+  tag on the same commit). Any other already tagged GITHUB_SHA fails as nothing new to release. When the branch
+  moved since GITHUB_SHA, the release tag on or directly above GITHUB_SHA is checked out and resumed.
+
+inputs:
+  bump:
+    description: patch, minor, major, prerelease, prepatch, preminor or premajor (npm semver inc semantics)
+    required: true
+  preid:
+    description: Prerelease identifier for pre* bumps
+    default: rc
+  files:
+    description: Newline-separated extra version files (package.json, Cargo.toml, or a plain file such as VERSION)
+    default: ""
+  working-directory:
+    description: Directory holding the root package.json / pnpm-workspace.yaml
+    default: .
+
+outputs:
+  version:
+    description: Version without the v prefix
+  tag:
+    description: vVERSION
+  sha:
+    description: The release commit the tag points at
+  resumed:
+    description: true when HEAD was already tagged and an interrupted release continues
+  packages:
+    description: JSON array of non-private workspace package directories, relative to the repository root
+  prerelease:
+    description: true when the version has a prerelease suffix
+
+runs:
+  using: node24
+  main: index.mjs

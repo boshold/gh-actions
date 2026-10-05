@@ -1,0 +1,43 @@
+name: CI
+
+# TypeScript library / CLI CI. Pull requests run the fast stage, main the full stage (pack-install
+# smoke), the release the release stage (node/os matrix, extra tests).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+    inputs:
+      stage:
+        type: string
+        default: release
+    secrets:
+      # Same name as the repository secret, so direct runs and calls read it the same way.
+      PACKAGES_READ_TOKEN:
+        required: false
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+  packages: read
+  pull-requests: write
+
+jobs:
+  ci:
+    uses: boshold/gh-actions-public/.github/workflows/node-ci.yml@v1
+    with:
+      stage: ${{ inputs.stage || (github.event_name == 'push' && 'full') || 'fast' }}
+      coverage-report: true
+      test-full-command: pnpm test:integration
+      # Installs the packed tarballs into an empty project, then runs this there.
+      pack-smoke-command: npx my-cli --version
+      node-versions: '["22", "24"]'
+      os: '["linux", "macos"]'
+      extra-tests: |
+        [{"name": "bun", "stage": "full", "bun": "file", "setup": "pnpm build", "command": "pnpm smoke:bun"}]
+    secrets:
+      packages-token: ${{ secrets.PACKAGES_READ_TOKEN }}

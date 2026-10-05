@@ -1,0 +1,36 @@
+name: Preview slot
+description: >-
+  Selects one labeled same-repository pull request for a shared preview slot (removing the label from the
+  previous owner) or tells the caller to restore the idle placeholder. Fork pull requests never deploy.
+  The check modes revalidate ownership right before a deploy.
+
+inputs:
+  mode:
+    description: >-
+      decide (event-driven slot selection), check (owner=true when pr is open, same-repo, the only labeled
+      same-repo PR and its head is still head-sha) or check-idle (owner=true when no open same-repo PR has the label)
+    default: decide
+  pr:
+    description: Pull request number (mode check)
+    default: ""
+  head-sha:
+    description: Commit sha that was built (mode check)
+    default: ""
+  label:
+    description: Label that owns the preview slot
+    default: preview
+  token:
+    description: Token with pull-requests write (label removal) or read (check modes)
+    default: ${{ github.token }}
+
+outputs:
+  deploy:
+    description: (decide) true when the triggering pull request should be built and deployed
+  placeholder:
+    description: (decide) true when the idle placeholder should be restored
+  owner:
+    description: (check, check-idle) true when the deploy may proceed
+
+runs:
+  using: node24
+  main: index.mjs

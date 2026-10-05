@@ -1,0 +1,55 @@
+name: Services
+description: Starts Postgres (container or PGDG binaries), Mailpit and/or a compose file, waits until healthy and removes them when the job ends.
+
+inputs:
+  postgres-version:
+    description: Postgres image tag, e.g. "18", "17-alpine" or "18@sha256:…"; empty skips Postgres
+    default: ""
+  postgres-mode:
+    description: container (docker run, health-checked) or binaries (PGDG server binaries on PATH, no cluster)
+    default: container
+  postgres-user:
+    default: postgres
+  postgres-password:
+    default: postgres
+  postgres-db:
+    default: postgres
+  postgres-port:
+    description: Host port
+    default: "5432"
+  postgres-extra-databases:
+    description: Comma or newline separated extra databases created after startup
+    default: ""
+  mailpit-version:
+    description: Mailpit image tag, e.g. "v1.30" or "v1.30@sha256:…"; empty skips Mailpit
+    default: ""
+  mailpit-smtp-port:
+    default: "1025"
+  mailpit-http-port:
+    default: "8025"
+  compose-file:
+    description: Optional docker compose file started with up --wait
+    default: ""
+  wait-seconds:
+    description: Health wait per service
+    default: "60"
+  name-suffix:
+    description: Container/project name suffix; empty is <run id>-<attempt>-<job>
+    default: ""
+
+outputs:
+  database-url:
+    description: postgresql:// URL of postgres-db (container mode only)
+  postgres-container:
+    description: Started Postgres container name
+  mailpit-container:
+    description: Started Mailpit container name
+  compose-project:
+    description: Started compose project name
+
+# post removes the started containers and compose project, also after failures
+runs:
+  using: node24
+  main: index.mjs
+  post: post.mjs
+  post-if: always()

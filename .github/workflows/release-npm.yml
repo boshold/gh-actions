@@ -1,0 +1,263 @@
+name: Release npm
+
+# Reusable release of pnpm packages to GitHub Packages. Job build (read-only token, runs dependency
+# code): bump every workspace manifest, commit + tag locally, build, pack. Job publish (write token,
+# no install, no build): fetch the release commit + tag from a git bundle, push them, create the
+# GitHub release, publish the tarballs.
+# npmjs.com: use release-tag.yml + the npm-publish action in a caller job instead (OIDC trusted
+# publishing binds to the caller workflow file); see templates/ts-lib-npmjs.
+# Callers run their CI (stage: release) first, grant contents: write and packages: write.
+# Every step after the push is idempotent: a failed run is fixed by re-running it.
+
+on:
+  workflow_call:
+    inputs:
+      bump:
+        type: string
+        required: true
+        description: patch, minor, major, prerelease, prepatch, preminor or premajor
+      preid:
+        type: string
+        default: rc
+      dry-run:
+        type: boolean
+        default: false
+        description: Bump and build, but push, publish and release nothing
+      version-files:
+        type: string
+        default: ""
+        description: Newline-separated extra files carrying the version, e.g. Cargo.toml
+      packages:
+        type: string
+        default: ""
+        description: Newline-separated package dirs in publish order; empty is every non-private workspace package
+      build-command:
+        type: string
+        default: pnpm build
+      dist-tag:
+        type: string
+        default: ""
+        description: Empty is latest, or the prerelease id for prereleases
+      working-directory:
+        type: string
+        default: "."
+      node-version:
+        type: string
+        default: ""
+      pnpm-version:
+        type: string
+        default: ""
+      registry-scope:
+        type: string
+        default: ""
+        description: Empty is @<repository owner>
+      install-command:
+        type: string
+        default: pnpm install --frozen-lockfile
+      env:
+        type: string
+        default: ""
+        description: Multiline KEY=VALUE for the build
+      make-latest:
+        type: string
+        default: auto
+      runner:
+        type: string
+        default: ""
+      timeout-minutes:
+        type: number
+        default: 20
+    secrets:
+      packages-token:
+        required: false
+        description: Read token for installing from npm.pkg.github.com; falls back to github.token
+      release-token:
+        required: false
+        description: Push token (e.g. GitHub App) for protected branches; falls back to github.token
+      env-secrets:
+        required: false
+    outputs:
+      version:
+        value: ${{ jobs.build.outputs.version }}
+      tag:
+        value: ${{ jobs.build.outputs.tag }}
+      sha:
+        value: ${{ jobs.build.outputs.sha }}
+      prerelease:
+        value: ${{ jobs.build.outputs.prerelease }}
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner || (github.event.repository.private && vars.CI_RUNNER_STANDARD) || 'ubuntu-latest' }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      sha: ${{ steps.version.outputs.sha }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      resumed: ${{ steps.version.outputs.resumed }}
+    steps:
+      # Before any build; a dry run may come from any branch.
+      - name: Require the release branch
+        uses: $/.github/actions/release-publish
+        with:
+          mode: gate
+          dry-run: ${{ inputs.dry-run }}
+
+      # The branch, not the run's sha: a re-run has to see the release commit it created.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: $/.github/actions/setup
+        with:
+          node-version: ${{ inputs.node-version }}
+          pnpm-version: ${{ inputs.pnpm-version }}
+          registry: github
+          scope: ${{ inputs.registry-scope }}
+          token: ${{ secrets.packages-token }}
+          install-command: ${{ inputs.install-command }}
+          working-directory: ${{ inputs.working-directory }}
+          # Release builds never reuse a cache.
+          cache: "off"
+
+      - id: version
+        uses: $/.github/actions/release-version
+        with:
+          bump: ${{ inputs.bump }}
+          preid: ${{ inputs.preid }}
+          files: ${{ inputs.version-files }}
+          working-directory: ${{ inputs.working-directory }}
+
+      - name: Build
+        if: inputs.build-command != ''
+        uses: $/.github/actions/run
+        with:
+          name: build
+          command: ${{ inputs.build-command }}
+          working-directory: ${{ inputs.working-directory }}
+          env: ${{ inputs.env }}
+          env-secrets: ${{ secrets.env-secrets }}
+
+      # pnpm pack resolves workspace: and catalog: ranges; order.txt keeps the publish order.
+      - name: Pack
+        shell: bash
+        env:
+          PACKAGES: ${{ inputs.packages }}
+          DEFAULT_PACKAGES: ${{ steps.version.outputs.packages }}
+          WORKDIR: ${{ inputs.working-directory }}
+          OUT: ${{ runner.temp }}/npm-release
+        run: |
+          set -euo pipefail
+          rm -rf "$OUT" && mkdir -p "$OUT/packages"
+          if [[ -z "$PACKAGES" ]]; then
+            PACKAGES=$(jq -r '.[]' <<< "${DEFAULT_PACKAGES:-[]}")
+            base="."
+          else
+            base="$WORKDIR"
+          fi
+          i=0
+          while IFS= read -r dir; do
+            [[ -z "$dir" ]] && continue
+            i=$((i + 1))
+            mkdir -p "$OUT/tmp"
+            (cd "$base/$dir" && pnpm pack --pack-destination "$OUT/tmp" >/dev/null)
+            file=$(find "$OUT/tmp" -maxdepth 1 -name '*.tgz' | head -n 1)
+            [[ -n "$file" ]] || { echo "::error::pnpm pack produced no tarball in $dir"; exit 1; }
+            name="$(printf '%03d' "$i")-$(basename "$file")"
+            mv "$file" "$OUT/packages/$name"
+            rm -rf "$OUT/tmp"
+            echo "packages/$name" >> "$OUT/order.txt"
+          done <<< "$PACKAGES"
+          (( i > 0 )) || { echo "::error::no package to publish; every workspace package is private"; exit 1; }
+          cat "$OUT/order.txt"
+
+      # The release commit and tag for the publish job: only the commits after GITHUB_SHA (on the remote),
+      # or the full history when the tag sits on GITHUB_SHA itself (no version commit, maybe a root commit).
+      - name: Bundle the release commit
+        if: steps.version.outputs.resumed != 'true'
+        shell: bash
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          OUT: ${{ runner.temp }}/npm-release
+        run: |
+          set -euo pipefail
+          if [[ "$(git rev-parse "refs/tags/$TAG^{commit}")" != "$(git rev-parse "$GITHUB_SHA^{commit}")" ]]; then
+            git bundle create "$OUT/release.bundle" "refs/tags/$TAG" "^$GITHUB_SHA"
+          else
+            git bundle create "$OUT/release.bundle" "refs/tags/$TAG"
+          fi
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          # Fixed name + overwrite: re-running only the publish job finds it, a full re-run replaces it.
+          name: npm-release
+          path: ${{ runner.temp }}/npm-release/
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
+
+  publish:
+    needs: build
+    runs-on: ${{ inputs.runner || (github.event.repository.private && vars.CI_RUNNER_LIGHT) || 'ubuntu-latest' }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-release
+          path: ${{ runner.temp }}/npm-release
+
+      - name: Fetch the release commit and tag
+        id: release
+        shell: bash
+        env:
+          TAG: ${{ needs.build.outputs.tag }}
+          SHA: ${{ needs.build.outputs.sha }}
+          OUT: ${{ runner.temp }}/npm-release
+        run: |
+          set -euo pipefail
+          if [[ -f "$OUT/release.bundle" ]]; then
+            git fetch --no-tags "$OUT/release.bundle" "refs/tags/$TAG:refs/tags/$TAG"
+          fi
+          [[ "$(git rev-parse "refs/tags/$TAG^{commit}")" == "$SHA" ]] || { echo "::error::tag $TAG is not at $SHA"; exit 1; }
+          { echo "packages<<EOF"; sed "s#^#$OUT/#" "$OUT/order.txt"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+
+      - name: Push the release commit and tag, create the release
+        uses: $/.github/actions/release-publish
+        with:
+          tag: ${{ needs.build.outputs.tag }}
+          sha: ${{ needs.build.outputs.sha }}
+          dry-run: ${{ inputs.dry-run }}
+          resumed: ${{ needs.build.outputs.resumed }}
+          prerelease: ${{ needs.build.outputs.prerelease }}
+          make-latest: ${{ inputs.make-latest }}
+          token: ${{ secrets.release-token || github.token }}
+
+      # No install or build here: only the packed tarballs.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Publish
+        uses: $/.github/actions/npm-publish
+        with:
+          packages: ${{ steps.release.outputs.packages }}
+          registry: github
+          tag: ${{ inputs.dist-tag }}
+          version: ${{ needs.build.outputs.version }}
+          dry-run: ${{ inputs.dry-run }}
+          token: ${{ github.token }}

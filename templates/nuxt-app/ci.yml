@@ -1,0 +1,84 @@
+name: CI
+
+# Nuxt app CI. Pull requests run the fast stage (lint, typecheck, unit, image build+smoke); label
+# a PR "ci:full" for the full stage. deploy-stage.yml runs this on main (full + image push),
+# release.yml with stage release.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      stage:
+        type: string
+        default: full
+      image-push:
+        type: boolean
+        default: false
+      image-tags:
+        type: string
+        default: ""
+    secrets:
+      # Same name as the repository secret, so direct runs and calls read it the same way.
+      PACKAGES_READ_TOKEN:
+        required: false
+    outputs:
+      image:
+        description: Pushed image pinned by digest
+        value: ${{ jobs.ci.outputs.image }}
+
+# github.workflow is the caller's name under workflow_call, so a deploy and a PR never cancel each other.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# packages: write only matters when a deploy workflow calls this with image-push.
+permissions:
+  contents: read
+  packages: write
+  pull-requests: write
+
+jobs:
+  ci:
+    # Label events re-run CI only for ci:full or migration:destructive (prisma check); calls (inputs.stage set) always run.
+    if: >-
+      inputs.stage || (github.event.action != 'labeled' && github.event.action != 'unlabeled')
+      || github.event.label.name == 'ci:full' || github.event.label.name == 'migration:destructive'
+    uses: boshold/gh-actions-public/.github/workflows/nuxt-ci.yml@v1
+    with:
+      stage: ${{ inputs.stage || (contains(github.event.pull_request.labels.*.name, 'ci:full') && 'full') || (github.event_name == 'workflow_dispatch' && 'full') || 'fast' }}
+      postgres-version: "18"
+      mailpit-version: v1.30
+      prepare-command: pnpm exec prisma generate
+      migrate-command: pnpm exec prisma migrate deploy
+      prisma-check: standard
+      seed-command: pnpm db:seed
+      test-command: pnpm test
+      e2e-command: pnpm test:e2e
+      playwright: true
+      coverage-report: true
+      image-build: true
+      image-on-fast: true
+      image-push: ${{ inputs.image-push == true }}
+      image-tags: ${{ inputs.image-tags }}
+      failure-artifact-path: test-results
+      env: |
+        APP_BASE_URL=http://localhost:3000
+        AUTH_SECRET=ci-only-secret-0000000000000000000000
+        DATABASE_URL=postgresql://postgres:postgres@localhost:5432/postgres
+        DEPLOYMENT_ENVIRONMENT=stage
+        SMTP_HOST=localhost
+        SMTP_PORT=1025
+        SMTP_FROM=app@ci.invalid
+      # Slow or special suites, by stage. See the README for every key.
+      # extra-tests: |
+      #   [{"name": "gateway-e2e", "stage": "full", "services": true, "hosts": ["app.localhost"],
+      #     "setup": "pnpm exec prisma migrate deploy && pnpm build",
+      #     "background": ["node .output/server/index.mjs"], "wait-url": "http://127.0.0.1:3000/api/health",
+      #     "command": "pnpm test:gateway", "playwright": true, "artifacts": ["test-results"]}]
+    secrets:
+      packages-token: ${{ secrets.PACKAGES_READ_TOKEN }}
+      # Masked KEY=VALUE lines, exported like env:
+      # env-secrets: |
+      #   SOME_API_KEY=${{ secrets.SOME_API_KEY }}

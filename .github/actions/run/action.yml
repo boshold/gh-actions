@@ -1,0 +1,34 @@
+name: Run
+description: Runs a command with multiline KEY=VALUE env (+ masked secrets), optionally exporting the env to later steps.
+
+inputs:
+  command:
+    description: Command run as bash -euo pipefail -c; empty only applies the env
+    default: ""
+  working-directory:
+    default: "."
+  env:
+    description: Newline-separated KEY=VALUE lines; blank lines and lines starting with # are ignored
+    default: ""
+  env-secrets:
+    description: Like env, but every value is masked in logs
+    default: ""
+  export:
+    description: Also export env and env-secrets to later steps of the job (GITHUB_ENV)
+    default: "false"
+  name:
+    description: Label for the log group
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        CMD: ${{ inputs.command }}
+        ENV_INPUT: ${{ inputs.env }}
+        ENV_SECRETS: ${{ inputs.env-secrets }}
+        EXPORT: ${{ inputs.export }}
+        LABEL: ${{ inputs.name }}
+      run: bash "$GITHUB_ACTION_PATH/run.sh"

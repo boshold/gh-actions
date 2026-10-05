@@ -1,0 +1,110 @@
+name: Deploy preview
+
+# One shared preview slot: the PR with the "preview" label owns it. Adding the label elsewhere moves
+# the slot; removing it, or closing the PR, restores the placeholder page.
+
+on:
+  pull_request:
+    types: [labeled, unlabeled, synchronize, reopened, closed]
+
+permissions:
+  contents: read
+
+jobs:
+  # Ungrouped: unrelated PR events stop here, so they never replace a pending preview run.
+  filter:
+    if: >-
+      (github.event.action == 'labeled' || github.event.action == 'unlabeled')
+      && github.event.label.name == 'preview'
+      || (github.event.action != 'labeled' && github.event.action != 'unlabeled'
+      && contains(github.event.pull_request.labels.*.name, 'preview'))
+    runs-on: ${{ (github.event.repository.private && vars.CI_RUNNER_LIGHT) || 'ubuntu-latest' }}
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: Relevant for the preview slot
+        shell: bash
+        run: echo "preview event"
+
+  slot:
+    needs: filter
+    concurrency:
+      group: deploy-preview
+      cancel-in-progress: false
+    runs-on: ${{ (github.event.repository.private && vars.CI_RUNNER_LIGHT) || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    outputs:
+      deploy: ${{ steps.slot.outputs.deploy }}
+      placeholder: ${{ steps.slot.outputs.placeholder }}
+    steps:
+      - id: slot
+        uses: boshold/gh-actions-public/.github/actions/preview-slot@v1
+        with:
+          token: ${{ github.token }}
+
+  ci:
+    needs: slot
+    if: needs.slot.outputs.deploy == 'true'
+    uses: $/.github/workflows/ci.yml
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: write
+    with:
+      stage: fast
+      image-push: true
+      image-tags: pr-${{ github.event.pull_request.number }}
+    secrets:
+      PACKAGES_READ_TOKEN: ${{ secrets.PACKAGES_READ_TOKEN }}
+
+  deploy:
+    needs: [slot, ci]
+    if: needs.slot.outputs.deploy == 'true'
+    concurrency:
+      group: deploy-preview
+      cancel-in-progress: false
+    uses: boshold/gh-actions-public/.github/workflows/deploy-dokploy.yml@v1
+    permissions:
+      contents: read
+      deployments: write
+      pull-requests: read
+    with:
+      environment: preview
+      project: my-app
+      image: ${{ needs.ci.outputs.image }}
+      revision: ${{ github.sha }}
+      health-url: https://preview.example.com/api/health
+      application-id: ${{ vars.DOKPLOY_APPLICATION_ID_PREVIEW }}
+      dokploy-url: ${{ vars.DOKPLOY_URL }}
+      # Re-checks slot ownership right before Dokploy changes (the slot may move during CI).
+      preview-pr: ${{ github.event.pull_request.number }}
+      preview-head-sha: ${{ github.event.pull_request.head.sha }}
+    secrets:
+      dokploy-api-key: ${{ secrets.DOKPLOY_API_KEY_PREVIEW }}
+
+  placeholder:
+    needs: slot
+    if: needs.slot.outputs.placeholder == 'true'
+    concurrency:
+      group: deploy-preview
+      cancel-in-progress: false
+    uses: boshold/gh-actions-public/.github/workflows/deploy-dokploy.yml@v1
+    permissions:
+      contents: read
+      deployments: write
+      pull-requests: read
+    with:
+      mode: placeholder
+      environment: preview
+      project: my-app
+      # Pin by digest (see the preview-placeholder workflow summary).
+      image: ghcr.io/boshold/preview-placeholder:main
+      revision: ${{ github.event.pull_request.head.sha || github.sha }}
+      health-url: https://preview.example.com/api/health
+      application-id: ${{ vars.DOKPLOY_APPLICATION_ID_PREVIEW }}
+      dokploy-url: ${{ vars.DOKPLOY_URL }}
+      preview-pr: ${{ github.event.pull_request.number }}
+    secrets:
+      dokploy-api-key: ${{ secrets.DOKPLOY_API_KEY_PREVIEW }}
