@@ -196,7 +196,7 @@ setup
 rm "$REPO/$MIGRATIONS/migration_lock.toml"; commit
 expect "missing migration_lock.toml fails with a message" 1 'missing or unreadable migration_lock.toml'
 
-# --- fixes over the original port --------------------------------------------
+# --- base resolution and SQL edge cases ---------------------------------------
 setup
 expect "strict: no base on a pull request fails closed" 1 'no base ref on a pull request' LEVEL=strict BASE_REF=
 expect "strict: no base on push skips" 0 'skipped \(no base\)' LEVEL=strict BASE_REF= GITHUB_EVENT_NAME=push
