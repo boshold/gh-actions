@@ -35,25 +35,40 @@ test('make-latest auto marks only the highest stable version', () => {
 })
 
 // Published releases answer the tag lookup; drafts only show up in the release list.
+// Only the endpoints the actions use are answered, each with its exact method, path and options.
 function fakeClient(create, { tags = [] } = {}) {
   let stored = null
   const calls = []
+  const patches = []
   return {
     calls,
+    patches,
     setStored: release => { stored = release },
     request: async (method, path, options = {}) => {
       calls.push(`${method} ${path}`)
-      if (method === 'GET') return stored?.draft ? null : stored
+      if (method === 'GET') {
+        assert.match(path, /^\/repos\/o\/r\/releases\/tags\/v[^/]+$/u)
+        assert.deepEqual(options, { allow404: true })
+        return stored?.draft || path !== `/repos/o/r/releases/tags/${stored?.tag_name}` ? null : stored
+      }
       if (method === 'PATCH') {
+        assert.ok(stored, 'PATCH without a release')
+        assert.equal(path, `/repos/o/r/releases/${stored.id}`)
+        assert.deepEqual(Object.keys(options), ['body'])
+        patches.push(options.body)
         stored = { ...stored, ...options.body, html_url: 'published' }
         return stored
       }
+      assert.equal(method, 'POST')
+      assert.equal(path, '/repos/o/r/releases')
+      assert.deepEqual(Object.keys(options), ['body'])
       return create(options.body, release => { stored = release })
     },
     paginate: async (path) => {
       calls.push(`LIST ${path}`)
-      if (path.includes('/git/matching-refs/')) return tags.map(tag => ({ ref: `refs/tags/${tag}` }))
-      return stored ? [{ tag_name: 'v0.9.0' }, stored] : []
+      if (path === '/repos/o/r/git/matching-refs/tags/v?per_page=100') return tags.map(tag => ({ ref: `refs/tags/${tag}` }))
+      assert.equal(path, '/repos/o/r/releases?per_page=100')
+      return stored ? [{ id: 99, tag_name: 'v0.9.0' }, stored] : []
     },
   }
 }
@@ -68,7 +83,7 @@ test('ensureRelease creates, reuses, and survives a concurrent create', async ()
   })
 
   const existing = fakeClient(() => assert.fail('must not create'))
-  existing.setStored({ id: 2 })
+  existing.setStored({ id: 2, tag_name: 'v1.0.0' })
   assert.equal((await ensureRelease(existing, 'o/r', input, () => {})).id, 2)
 
   const raced = fakeClient((body, store) => {
@@ -98,9 +113,18 @@ test('drafts are created without make_latest, found by tag, and finalized', asyn
 
   const published = await finalizeRelease(client, 'o/r', { tag: 'v1.0.0', makeLatest: 'auto' }, () => {})
   assert.deepEqual([published.draft, published.make_latest], [false, 'true'])
+  assert.deepEqual(client.patches, [{ draft: false, make_latest: 'true' }])
   assert.equal(client.calls.filter(call => call.startsWith('PATCH')).length, 1)
+  assert.ok(client.calls.includes('PATCH /repos/o/r/releases/4'))
 
   await finalizeRelease(client, 'o/r', { tag: 'v1.0.0', makeLatest: 'auto' }, () => {})
   assert.equal(client.calls.filter(call => call.startsWith('PATCH')).length, 1, 'already published: no change')
   await assert.rejects(finalizeRelease(fakeClient(() => {}), 'o/r', { tag: 'v2.0.0', makeLatest: 'auto' }, () => {}), /No GitHub release/)
+
+  const rc = fakeClient(() => assert.fail('must not create'), { tags: ['v1.0.0', 'v2.0.0-rc.0'] })
+  rc.setStored({ id: 7, tag_name: 'v2.0.0-rc.0', draft: true, prerelease: true })
+  const finalized = await finalizeRelease(rc, 'o/r', { tag: 'v2.0.0-rc.0', makeLatest: 'auto' }, () => {})
+  assert.equal(finalized.prerelease, true)
+  assert.deepEqual(rc.patches, [{ draft: false, make_latest: 'false' }], 'a prerelease never becomes latest')
+  assert.ok(rc.calls.includes('PATCH /repos/o/r/releases/7'))
 })

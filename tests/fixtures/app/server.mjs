@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 // Health contract fixture: GET /api/health -> {status, revision}.
+import { readFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import process from 'node:process'
 
 if (process.argv.includes('--version')) {
-  console.log('0.0.0')
+  const { version } = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'))
+  console.log(version)
   process.exit(0)
 }
 

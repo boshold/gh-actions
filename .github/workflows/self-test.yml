@@ -115,12 +115,19 @@ jobs:
 
   # The reusable workflows below run against tests/fixtures/app. `$/` inside them resolves to this
   # commit, so a pull request tests its own actions.
+  # Stage filtering: the full and release entries fail if they run at fast.
   nuxt-fast:
     uses: $/.github/workflows/nuxt-ci.yml
     with:
       stage: fast
       working-directory: tests/fixtures/app
       install-directory: tests/fixtures/app
+      extra-tests: |
+        [
+          {"name": "fast entry runs", "stage": "fast", "runner": "light", "command": "node --test server.test.mjs"},
+          {"name": "must not run", "stage": "full", "command": "exit 1"},
+          {"name": "must not run (release)", "stage": "release", "runner": "light", "command": "exit 1"}
+        ]
 
   nuxt-fast-parallel:
     uses: $/.github/workflows/nuxt-ci.yml
@@ -139,9 +146,10 @@ jobs:
       postgres-version: "18"
       postgres-extra-databases: second
       mailpit-version: v1.30
-      migrate-command: echo "migrate against $DATABASE_URL"
-      seed-command: echo seed
-      e2e-command: echo e2e
+      # Real psql/SMTP/Mailpit round trip; e2e.sh asserts the seed, then runs e2e.mjs.
+      migrate-command: bash scripts/migrate.sh
+      seed-command: bash scripts/seed.sh
+      e2e-command: bash scripts/e2e.sh
       env: |
         DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres
       image-build: true
@@ -151,11 +159,13 @@ jobs:
       extra-tests: |
         [
           {"name": "server e2e", "stage": "full", "background": ["PORT=3100 node server.mjs"],
-           "wait-url": "http://127.0.0.1:3100/api/health", "env": {"PORT": "3100"}, "command": "pnpm e2e"},
+           "wait-url": "http://127.0.0.1:3100/api/health",
+           "env": {"PORT": "3100", "DEPLOYMENT_REVISION": "extra-e2e", "EXPECTED_REVISION": "extra-e2e"},
+           "command": "pnpm e2e"},
           {"name": "release only", "stage": "release", "runner": "light", "command": "echo release stage"}
         ]
 
-  # Default inputs: auto commands resolve to a plain build, no prepare.
+  # Default inputs: auto commands resolve to a plain build, no prepare. pnpm build fails unless dist/server.mjs runs.
   node-defaults:
     uses: $/.github/workflows/node-ci.yml
     with:
@@ -172,10 +182,14 @@ jobs:
       build-command: pnpm build
       playground-build-command: ""
       pack-packages: tests/fixtures/app
-      pack-smoke-command: npx fixture-app --version
+      # The installed CLI must print the version of the source package.json.
+      pack-smoke-command: |
+        got=$(npx fixture-app --version)
+        want=$(jq -r .version "$GITHUB_WORKSPACE/tests/fixtures/app/package.json")
+        [[ "$got" == "$want" ]] || { echo "::error::fixture-app --version printed '$got', expected '$want'"; exit 1; }
       node-versions: '["22", "24"]'
       os: '["linux", "arm64"]'
-      matrix-command: pnpm test
+      matrix-command: node --test server.test.mjs
 
   prisma-check:
     uses: $/.github/workflows/prisma-check.yml

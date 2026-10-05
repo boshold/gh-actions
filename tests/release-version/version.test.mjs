@@ -206,8 +206,18 @@ test('run commits and tags the bump, then resumes on a repeated run', () => {
 })
 
 test('run refuses when the branch moved after the tested commit', () => {
-  const { run } = workspaceRepository()
-  assert.throws(() => run('patch', '0'.repeat(40)), /the branch moved/)
+  const { git, write, commit, run, read } = workspaceRepository()
+  const tested = git('rev-parse', 'HEAD')
+  write({ 'README.md': 'later\n' })
+  commit('feat: later')
+  const head = git('rev-parse', 'HEAD')
+  const files = ['module/package.json', 'Cargo.toml', 'Cargo.lock', 'VERSION', 'README.md']
+  const before = files.map(read)
+  assert.throws(() => run('patch', tested), /the branch moved/)
+  assert.equal(git('rev-parse', 'HEAD'), head)
+  assert.equal(git('tag', '--list'), 'v0.5.1')
+  assert.equal(git('status', '--porcelain'), '')
+  assert.deepEqual(files.map(read), before)
 })
 
 test('run releases a single-commit repository and a prerelease', () => {
@@ -246,13 +256,20 @@ test('run bumps cargo workspace members that inherit the version', () => {
 })
 
 test('run honors working-directory and reports packages from the repository root', () => {
-  const { git, run, read } = repository({
+  const sibling = '{\n  "name": "lib",\n  "version": "1.0.0"\n}\n'
+  const { git, write, commit, run, read } = repository({
     'app/package.json': '{\n  "name": "app",\n  "version": "1.0.0"\n}\n',
+    'lib/package.json': sibling,
   })
+  git('tag', 'v1.0.0')
+  write({ 'app/README.md': 'change\n' })
+  commit('feat: change')
   const result = run('major', git('rev-parse', 'HEAD'), { 'INPUT_WORKING-DIRECTORY': 'app' })
-  assert.equal(result.version, '1.0.0', 'no tags yet: 0.0.0 + major')
+  assert.equal(result.version, '2.0.0')
   assert.equal(result.packages, '["app"]')
-  assert.equal(JSON.parse(read('app/package.json')).version, '1.0.0')
+  assert.equal(JSON.parse(read('app/package.json')).version, '2.0.0')
+  assert.equal(read('lib/package.json'), sibling)
+  assert.equal(git('status', '--porcelain'), '')
 })
 
 test('json version finds the top-level key in any layout', () => {
