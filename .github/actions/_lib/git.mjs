@@ -1,7 +1,16 @@
 import { execFileSync } from 'node:child_process'
 
+function exec(args, env = process.env) {
+  try {
+    return execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env }).trim()
+  } catch (cause) {
+    const stderr = String(cause.stderr ?? '').trim()
+    throw new Error(`git ${args.join(' ')} failed (exit ${cause.status ?? 'unknown'})${stderr ? `: ${stderr}` : ''}`)
+  }
+}
+
 export function git(...args) {
-  return execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+  return exec(args)
 }
 
 export function gitTry(...args) {
@@ -18,12 +27,14 @@ export function basicAuth(token) {
 
 // The auth header travels only in this child's env (GIT_CONFIG_*), never argv or
 // GIT_CONFIG_PARAMETERS; hooks are disabled so repository code cannot read it.
-// Empty values reset extraheaders inherited from config (incl. actions/checkout's URL-scoped one).
+// Empty values reset inherited extraheaders (incl. actions/checkout's URL-scoped one). The header goes on the
+// URL-scoped key: git applies URL-specific values after the generic key, so a URL reset would drop a generic header.
 export function tokenGitInvocation(token, args, { env = process.env, serverUrl = env.GITHUB_SERVER_URL || 'https://github.com' } = {}) {
+  const scoped = `http.${serverUrl.replace(/\/*$/, '/')}.extraheader`
   const entries = [
     ['http.extraheader', ''],
-    [`http.${serverUrl.replace(/\/*$/, '/')}.extraheader`, ''],
-    ['http.extraheader', `AUTHORIZATION: basic ${basicAuth(token)}`],
+    [scoped, ''],
+    [scoped, `AUTHORIZATION: basic ${basicAuth(token)}`],
   ]
   const start = Number.parseInt(env.GIT_CONFIG_COUNT ?? '', 10) || 0
   const config = Object.fromEntries(entries.flatMap(([key, value], index) => [
@@ -38,5 +49,5 @@ export function tokenGitInvocation(token, args, { env = process.env, serverUrl =
 
 export function gitWithToken(token, ...args) {
   const { args: argv, env } = tokenGitInvocation(token, args)
-  return execFileSync('git', argv, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env }).trim()
+  return exec(argv, env)
 }

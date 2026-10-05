@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { basicAuth, tokenGitInvocation } from '../../.github/actions/_lib/git.mjs'
+import { basicAuth, gitWithToken, tokenGitInvocation } from '../../.github/actions/_lib/git.mjs'
 
 const TOKEN = 'ghs_secret'
 
@@ -15,8 +15,9 @@ test('the token reaches git only through env config, with hooks disabled', () =>
   assert.equal(env.GIT_CONFIG_PARAMETERS, undefined)
   assert.deepEqual(
     [env.GIT_CONFIG_COUNT, env.GIT_CONFIG_KEY_0, env.GIT_CONFIG_KEY_1, env.GIT_CONFIG_VALUE_1, env.GIT_CONFIG_KEY_2, env.GIT_CONFIG_KEY_3],
-    ['4', 'a.b', 'http.extraheader', '', 'http.https://github.com/.extraheader', 'http.extraheader'],
+    ['4', 'a.b', 'http.extraheader', '', 'http.https://github.com/.extraheader', 'http.https://github.com/.extraheader'],
   )
+  assert.equal(env.GIT_CONFIG_VALUE_2, '', 'resets come before the header')
   assert.equal(env.GIT_CONFIG_VALUE_3, `AUTHORIZATION: basic ${basicAuth(TOKEN)}`)
 })
 
@@ -37,4 +38,14 @@ test('a pre-push hook in the repository never runs', () => {
   execFileSync('git', args, { env, stdio: 'ignore' })
   assert.equal(existsSync(leak), false)
   assert.equal(execFileSync('git', ['-C', join(dir, 'remote.git'), 'rev-parse', 'main'], { encoding: 'utf8' }).trim().length, 40)
+})
+
+test('the header survives the resets in effective git config', () => {
+  const { env } = tokenGitInvocation(TOKEN, [], { env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' }, serverUrl: 'https://github.com' })
+  const effective = execFileSync('git', ['config', '--get-urlmatch', 'http.extraheader', 'https://github.com/o/r.git'], { env, encoding: 'utf8' })
+  assert.equal(effective.trim(), `AUTHORIZATION: basic ${basicAuth(TOKEN)}`)
+})
+
+test('git failures carry stderr', () => {
+  assert.throws(() => gitWithToken(TOKEN, 'ls-remote', '/nonexistent/repo.git'), /git -c core\.hooksPath=\/dev\/null ls-remote \/nonexistent\/repo\.git failed \(exit 128\): .*nonexistent/s)
 })
