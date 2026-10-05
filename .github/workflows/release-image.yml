@@ -247,7 +247,8 @@ jobs:
           context: ${{ inputs.context }}
           dockerfile: ${{ inputs.dockerfile }}
           image: ${{ steps.name.outputs.image }}
-          tags: sha-${{ steps.version.outputs.sha }}
+          # Digest pushes take no tags; the tag step below adds them after the checks
+          tags: ${{ inputs.dry-run && format('sha-{0}', steps.version.outputs.sha) || '' }}
           build-args: ${{ inputs.build-args }}
           platforms: ${{ !inputs.dry-run && inputs.platforms || '' }}
           registry: ${{ inputs.registry }}

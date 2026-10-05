@@ -92,3 +92,15 @@ test('post without state does nothing and docker failures only warn', () => {
   assert.match(failed.stdout, /::warning::docker rm --force --volumes ci-mailpit-x failed/)
   assert.deepEqual(calls(box.log), ['docker rm --force --volumes ci-mailpit-x'])
 })
+
+test('database-url percent-encodes UTF-8 bytes under a UTF-8 locale', () => {
+  const box = sandbox()
+  const files = { GITHUB_OUTPUT: join(box.dir, 'out'), GITHUB_STATE: join(box.dir, 'state') }
+  const main = node('index.mjs', {
+    ...files, PATH: box.path, LC_ALL: 'C.UTF-8',
+    'INPUT_POSTGRES-VERSION': '18', 'INPUT_POSTGRES-USER': 'ü', 'INPUT_POSTGRES-PASSWORD': 'päss', 'INPUT_POSTGRES-DB': 'db',
+    'INPUT_POSTGRES-PORT': '5432', 'INPUT_WAIT-SECONDS': '5', 'INPUT_NAME-SUFFIX': 'utf8',
+  })
+  assert.equal(main.status, 0, main.stdout + main.stderr)
+  assert.match(readFileSync(files.GITHUB_OUTPUT, 'utf8'), /^database-url=postgresql:\/\/%C3%BC:p%C3%A4ss@127\.0\.0\.1:5432\/db$/m)
+})

@@ -522,7 +522,8 @@ jobs:
           context: ${{ inputs.image-context }}
           dockerfile: ${{ inputs.image-dockerfile }}
           image: ${{ inputs.image }}
-          tags: ${{ inputs.image-tags }}
+          # Digest pushes take no tags; image-push adds them after every job passed
+          tags: ${{ env.BY_DIGEST != 'true' && inputs.image-tags || '' }}
           build-args: ${{ inputs.image-build-args }}
           registry: ${{ inputs.image-registry }}
           registry-password: ${{ secrets.registry-password || github.token }}

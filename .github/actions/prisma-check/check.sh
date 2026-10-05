@@ -120,7 +120,8 @@ destructive_reasons() {
   # shellcheck disable=SC2016 # literal backticks
   grep -qE '^[[:space:]]*-[[:space:]]+(You are about to|The required column|Added the required column|A unique constraint|The values|Changed the type|Made the column|The `[^`]+` column on the `[^`]+` table would be dropped)' "$file" \
     && echo "Prisma data-loss warning"
-  sql="$(strip_sql "$file")"
+  # One line: statements split across lines (DELETE\nFROM) still match
+  sql="$(strip_sql "$file" | tr -s '[:space:]' ' ')"
   grep -qiE 'DROP[[:space:]]+COLUMN' <<< "$sql" && echo "DROP COLUMN"
   grep -qiE 'ALTER[[:space:]]+COLUMN[^;]*[[:space:]]TYPE[[:space:]]' <<< "$sql" && echo "ALTER COLUMN TYPE"
   grep -qiE '(^|[[:space:];])TRUNCATE[[:space:]]' <<< "$sql" && echo "TRUNCATE"

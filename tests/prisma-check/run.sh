@@ -253,6 +253,13 @@ expect "DELETE FROM, RENAME COLUMN, DROP SCHEMA, DROP TYPE, table rename are des
   'destructive migration: DELETE FROM,RENAME COLUMN,DROP SCHEMA,DROP TYPE,RENAME TABLE user' LEVEL=strict
 
 setup
+add_migration 20260201000000_multiline 'DELETE
+FROM "user";
+DROP
+  TABLE "post";'; commit
+expect "statements split across lines are scanned" 1 'destructive migration: DELETE FROM,DROP TABLE post' LEVEL=strict PRISMA_COMMAND=true
+
+setup
 add_migration 20260201000000_do_block 'DO $$ BEGIN TRUNCATE "user"; END $$;'; commit
 expect "DO block body is scanned at strict" 1 'destructive migration: TRUNCATE' LEVEL=strict
 expect "DO block passes at strict with label" 0 'allowed \(label' LEVEL=strict 'PR_LABELS=["migration:destructive"]' PRISMA_COMMAND=true
@@ -271,7 +278,7 @@ add_migration 20260201000000_function 'CREATE FUNCTION "wipe"() RETURNS trigger 
 expect "function bodies stay stripped" 0 '\| destructive SQL \| ok \|' LEVEL=strict PRISMA_COMMAND=true
 
 if [[ "$PROVIDER" == sqlite ]]; then
-  rebuild() { # rebuild <select list> [where]
+  rebuild() { # rebuild <select list> [where] [insert column list, default: select list]
     printf '%s\n' 'PRAGMA defer_foreign_keys=ON;
 PRAGMA foreign_keys=OFF;
 CREATE TABLE "new_user" (
@@ -279,7 +286,7 @@ CREATE TABLE "new_user" (
     "email" TEXT NOT NULL,
     "name" TEXT DEFAULT '"'anon'"'
 );
-INSERT INTO "new_user" ('"$1"') SELECT '"$1"' FROM "user"'"${2:-}"';
+INSERT INTO "new_user" ('"${3:-$1}"') SELECT '"$1"' FROM "user"'"${2:-}"';
 DROP TABLE "user";
 ALTER TABLE "new_user" RENAME TO "user";
 CREATE UNIQUE INDEX "user_email_key" ON "user"("email");
@@ -302,6 +309,11 @@ PRAGMA defer_foreign_keys=OFF;'
   add_migration 20260201000000_rebuild "$(rebuild '"email", "id", "name"' ' WHERE "name" IS NOT NULL')"
   printf '%s\n' "$with_name_default" > "$REPO/$SCHEMA"; commit
   expect "filtered SQLite rebuild fails at strict" 1 'DROP TABLE user \(rebuild loses' LEVEL=strict
+
+  setup
+  add_migration 20260201000000_rebuild "$(rebuild '"id", "name", "email"' '' '"id", "email", "name"')"
+  printf '%s\n' "$with_name_default" > "$REPO/$SCHEMA"; commit
+  expect "SQLite rebuild that swaps columns fails at strict" 1 'DROP TABLE user \(rebuild loses' LEVEL=strict
 fi
 
 echo

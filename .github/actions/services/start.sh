@@ -17,7 +17,8 @@ suffix="${NAME_SUFFIX:-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-${GITHUB
 suffix="$(printf '%s' "$suffix" | tr -c 'A-Za-z0-9_.-' '-' | tr '[:upper:]' '[:lower:]')"
 
 urlencode() {
-  local s="$1" i c encoded=""
+  # Bytes, not characters: UTF-8 must encode as %C3%A4, not %E4
+  local LC_ALL=C s="$1" i c encoded=""
   for (( i = 0; i < ${#s}; i++ )); do
     c="${s:i:1}"
     case "$c" in

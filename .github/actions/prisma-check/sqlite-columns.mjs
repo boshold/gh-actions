@@ -2,7 +2,7 @@
 // Usage: node sqlite-columns.mjs <migration.sql> <all migration.sql files...>
 // Applies the migrations sorted before <migration.sql> to a temp DB, then runs <migration.sql>
 // statement by statement. Prints each table whose `DROP TABLE x` is preceded by
-// `INSERT INTO "new_x" (...) SELECT <every column of x> FROM "x"` (no WHERE etc.).
+// `INSERT INTO "new_x" (<cols>) SELECT <same cols, same positions> FROM "x"` (no WHERE etc.).
 import { readFileSync } from 'node:fs'
 import { basename, dirname } from 'node:path'
 import process from 'node:process'
@@ -101,9 +101,11 @@ function main() {
   for (const statement of statements(readFileSync(target, 'utf8'))) {
     const insert = INSERT_RE.exec(statement)
     if (insert) {
+      const column = (item) => BARE_RE.test(item) ? unquote(item).toLowerCase() : null
       inserts.set(unquote(insert[1]).toLowerCase(), {
         source: unquote(insert[4]).toLowerCase(),
-        items: new Set(selectItems(insert[3]).map(item => BARE_RE.test(item) ? unquote(item).toLowerCase() : item)),
+        targets: selectItems(insert[2]).map(column),
+        sources: selectItems(insert[3]).map(item => item === '*' ? '*' : column(item)),
       })
     }
     const drop = DROP_RE.exec(statement)
@@ -111,8 +113,14 @@ function main() {
       const table = unquote(drop[1])
       const copy = inserts.get(`new_${table}`.toLowerCase())
       if (copy?.source === table.toLowerCase()) {
-        const columns = db.prepare('SELECT name FROM pragma_table_info(?)').all(table)
-        const lost = columns.map(row => String(row.name)).filter(column => !copy.items.has('*') && !copy.items.has(column.toLowerCase()))
+        const columns = db.prepare('SELECT name FROM pragma_table_info(?)').all(table).map(row => String(row.name))
+        // `SELECT *` stands for the old columns in table order
+        const sources = copy.sources.length === 1 && copy.sources[0] === '*' ? columns.map(c => c.toLowerCase()) : copy.sources
+        // Each old column must land in the destination column of the same name, copied unchanged
+        const lost = columns.filter((c) => {
+          const at = copy.targets.indexOf(c.toLowerCase())
+          return copy.targets.length !== sources.length || at === -1 || sources[at] !== c.toLowerCase()
+        })
         if (columns.length && !lost.length) proven.push(table)
         else console.error(`${target}: rebuild of ${table} does not copy: ${lost.join(', ') || '(table unknown)'}`)
       }
