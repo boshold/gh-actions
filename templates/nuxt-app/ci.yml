@@ -29,8 +29,9 @@ on:
         value: ${{ jobs.ci.outputs.image }}
 
 # github.workflow is the caller's name under workflow_call, so a deploy and a PR never cancel each other.
+# Other label events get their own group: they skip every job and must not cancel a running CI.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}${{ contains(fromJSON('["labeled","unlabeled"]'), github.event.action) && !contains(fromJSON('["ci:full","migration:destructive"]'), github.event.label.name) && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # packages: write only matters when a deploy workflow calls this with image-push.

@@ -19,8 +19,9 @@ on:
       - prisma.config.ts
       - .github/workflows/prisma.yml
 
+# Other label events skip the job and must not cancel a running check.
 concurrency:
-  group: prisma-${{ github.ref }}
+  group: prisma-${{ github.ref }}${{ contains(fromJSON('["labeled","unlabeled"]'), github.event.action) && github.event.label.name != 'migration:destructive' && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
