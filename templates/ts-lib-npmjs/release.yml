@@ -39,7 +39,7 @@ jobs:
 
   tag:
     needs: ci
-    uses: boshold/gh-actions-public/.github/workflows/release-tag.yml@v1
+    uses: boshold/gh-actions/.github/workflows/release-tag.yml@v1
     permissions:
       contents: write
     with:
@@ -60,7 +60,7 @@ jobs:
           ref: ${{ inputs.dry-run && github.ref || needs.tag.outputs.tag }}
           persist-credentials: false
 
-      - uses: boshold/gh-actions-public/.github/actions/setup@v1
+      - uses: boshold/gh-actions/.github/actions/setup@v1
         with:
           registry: npmjs
           cache: "off"
@@ -114,7 +114,7 @@ jobs:
           set -euo pipefail
           { echo "packages<<EOF"; sed 's#^#release/#' release/order.txt; echo "EOF"; } >> "$GITHUB_OUTPUT"
 
-      - uses: boshold/gh-actions-public/.github/actions/npm-publish@v1
+      - uses: boshold/gh-actions/.github/actions/npm-publish@v1
         with:
           registry: npmjs
           packages: ${{ steps.order.outputs.packages }}

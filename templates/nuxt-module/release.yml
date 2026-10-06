@@ -37,7 +37,7 @@ jobs:
 
   release:
     needs: ci
-    uses: boshold/gh-actions-public/.github/workflows/release-npm.yml@v1
+    uses: boshold/gh-actions/.github/workflows/release-npm.yml@v1
     permissions:
       contents: write
       packages: write
@@ -51,7 +51,7 @@ jobs:
   # Demo image from the release commit, deployed and stopped until a visitor wakes it.
   # demo:
   #   needs: release
-  #   uses: boshold/gh-actions-public/.github/workflows/release-demo.yml@v1
+  #   uses: boshold/gh-actions/.github/workflows/release-demo.yml@v1
   #   permissions:
   #     contents: write
   #     packages: write

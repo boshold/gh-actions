@@ -28,7 +28,7 @@ permissions:
 
 jobs:
   ci:
-    uses: boshold/gh-actions-public/.github/workflows/node-ci.yml@v1
+    uses: boshold/gh-actions/.github/workflows/node-ci.yml@v1
     with:
       stage: ${{ inputs.stage || (github.event_name == 'push' && 'full') || 'fast' }}
       preset: nuxt-module

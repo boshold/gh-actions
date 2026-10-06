@@ -32,7 +32,7 @@ jobs:
     if: >-
       (github.event.action != 'labeled' && github.event.action != 'unlabeled')
       || github.event.label.name == 'migration:destructive'
-    uses: boshold/gh-actions-public/.github/workflows/prisma-check.yml@v1
+    uses: boshold/gh-actions/.github/workflows/prisma-check.yml@v1
     with:
       level: strict
       prepare-command: pnpm exec prisma generate
