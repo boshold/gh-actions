@@ -32,7 +32,7 @@ jobs:
 
   deploy:
     needs: ci
-    uses: boshold/gh-actions-public/.github/workflows/deploy-dokploy.yml@v1
+    uses: boshold/gh-actions/.github/workflows/deploy-dokploy.yml@v1
     permissions:
       contents: read
       deployments: write

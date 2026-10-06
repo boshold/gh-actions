@@ -31,7 +31,7 @@ jobs:
 
   tag:
     needs: ci
-    uses: boshold/gh-actions-public/.github/workflows/release-tag.yml@v1
+    uses: boshold/gh-actions/.github/workflows/release-tag.yml@v1
     permissions:
       contents: write
     with:
@@ -96,13 +96,13 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - uses: boshold/gh-actions-public/.github/actions/release-assets@v1
+      - uses: boshold/gh-actions/.github/actions/release-assets@v1
         with:
           tag: ${{ needs.tag.outputs.tag }}
           files: dist/*
           checksums: "true"
 
-      - uses: boshold/gh-actions-public/.github/actions/release-publish@v1
+      - uses: boshold/gh-actions/.github/actions/release-publish@v1
         with:
           mode: finalize
           tag: ${{ needs.tag.outputs.tag }}

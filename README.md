@@ -1,4 +1,4 @@
-# gh-actions-public
+# gh-actions
 
 Shared GitHub Actions workflows and actions for Nuxt apps, Nuxt modules, TypeScript libraries and CLIs, binaries and Docker images. The repo is public so public and private repositories can both call it.
 
@@ -7,7 +7,7 @@ Callers pin `@v1`. The `v1` tag moves with every `v1.x.y` release.
 ```yaml
 jobs:
   ci:
-    uses: boshold/gh-actions-public/.github/workflows/nuxt-ci.yml@v1
+    uses: boshold/gh-actions/.github/workflows/nuxt-ci.yml@v1
 ```
 
 Copy a starting point from [`templates/`](templates) and adjust it.
@@ -90,7 +90,7 @@ What keeps the fast stage fast:
 
 ## Actions
 
-Workflows use these internally. They can also be used directly as `boshold/gh-actions-public/.github/actions/<name>@v1`.
+Workflows use these internally. They can also be used directly as `boshold/gh-actions/.github/actions/<name>@v1`.
 
 | Action | What it does |
 |---|---|

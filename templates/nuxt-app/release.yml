@@ -41,7 +41,7 @@ jobs:
 
   release:
     needs: ci
-    uses: boshold/gh-actions-public/.github/workflows/release-image.yml@v1
+    uses: boshold/gh-actions/.github/workflows/release-image.yml@v1
     permissions:
       contents: write
       packages: write
@@ -65,7 +65,7 @@ jobs:
   production:
     needs: release
     if: ${{ !inputs.dry-run }}
-    uses: boshold/gh-actions-public/.github/workflows/deploy-dokploy.yml@v1
+    uses: boshold/gh-actions/.github/workflows/deploy-dokploy.yml@v1
     permissions:
       contents: read
       deployments: write
