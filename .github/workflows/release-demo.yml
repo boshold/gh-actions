@@ -104,7 +104,11 @@ on:
       scan:
         type: boolean
         default: true
-        description: Fail on fixable HIGH/CRITICAL vulnerabilities and attach an SBOM to the release
+        description: Report fixable HIGH/CRITICAL vulnerabilities and attach an SBOM to the release
+      scan-fail:
+        type: boolean
+        default: false
+        description: Fail the release when the scan reports fixable HIGH/CRITICAL vulnerabilities
       environment:
         type: string
         default: production
@@ -215,6 +219,7 @@ jobs:
       mailpit-version: ${{ inputs.mailpit-version }}
       compose-file: ${{ inputs.compose-file }}
       scan: ${{ inputs.scan }}
+      scan-fail: ${{ inputs.scan-fail }}
       runner: ${{ inputs.runner }}
       timeout-minutes: ${{ inputs.image-timeout-minutes }}
     secrets:

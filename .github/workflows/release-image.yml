@@ -112,7 +112,11 @@ on:
       scan:
         type: boolean
         default: true
-        description: Fail on fixable HIGH/CRITICAL vulnerabilities and attach an SBOM to the release
+        description: Report fixable HIGH/CRITICAL vulnerabilities and attach an SBOM to the release
+      scan-fail:
+        type: boolean
+        default: false
+        description: Fail the release when the scan reports fixable HIGH/CRITICAL vulnerabilities
       runner:
         type: string
         default: ""
@@ -287,10 +291,29 @@ jobs:
         with:
           image-ref: ${{ steps.existing.outputs.image || steps.build.outputs.image }}
           format: table
+          output: ${{ runner.temp }}/trivy.txt
           scanners: vuln
           severity: HIGH,CRITICAL
           ignore-unfixed: true
-          exit-code: "1"
+          exit-code: "0"
+
+      # New advisories against unchanged code should not block a release unless the caller opts in.
+      - name: Report the scan
+        if: inputs.scan
+        shell: bash
+        env:
+          REPORT: ${{ runner.temp }}/trivy.txt
+          SCAN_FAIL: ${{ inputs.scan-fail }}
+        run: |
+          set -euo pipefail
+          cat "$REPORT"
+          grep -qE 'Total: [1-9]' "$REPORT" || exit 0
+          { echo '### Fixable HIGH/CRITICAL vulnerabilities'; echo '```'; cat "$REPORT"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$SCAN_FAIL" == true ]]; then
+            echo "::error::the image has fixable HIGH/CRITICAL vulnerabilities"
+            exit 1
+          fi
+          echo "::warning::the image has fixable HIGH/CRITICAL vulnerabilities, see the job summary"
 
       - name: Generate the SBOM
         if: inputs.scan
