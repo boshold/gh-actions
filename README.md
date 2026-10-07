@@ -101,7 +101,7 @@ Workflows use these internally. They can also be used directly as `boshold/gh-ac
 | `image-build` | Buildx build with GHA cache, load or push |
 | `image-smoke` | Boots an image and checks `/api/health` |
 | `prisma-check` | Migration deploy, drift and SQL checks |
-| `supply-chain` | `pnpm audit`, Trivy, SBOM |
+| `supply-chain` | Opt-in `pnpm audit`, Trivy, SBOM (blocking) |
 | `coverage` | Vitest coverage comment on pull requests |
 | `npm-publish` | Publish to npmjs.com or GitHub Packages, skips versions that already exist |
 | `release-version` | Next version, bumps manifests, release commit and tag |
@@ -127,6 +127,7 @@ Details:
 - Only the default branch can release. `dry-run: true` works from any branch and pushes nothing.
 - The push uses `github.token` unless a `release-token` secret is passed. Use a GitHub App token when the default branch is protected. Pushes made with `github.token` do not start other workflows.
 - Images are built once and pushed untagged by digest. Smoke test, scan and SBOM run on that pulled digest, and tags are added to it only after they pass, so the published bytes are the tested ones. `latest` only moves for the highest stable version.
+- The image scan (Trivy, fixable HIGH/CRITICAL) reports to the job summary with a warning and does not block the release; `scan-fail: true` makes it blocking. Dependabot (see `templates/dependabot.yml`, including the `docker` ecosystem) keeps dependencies and base images current.
 - The same applies to `nuxt-ci.yml` with `image-push: true`: `verify` pushes and tests the digest, `image-push` tags it once every job is green. Failed runs leave untagged versions in GHCR. Set a cleanup policy for untagged versions on the package (for example [actions/delete-package-versions](https://github.com/actions/delete-package-versions) with `delete-only-untagged-versions: true` on a schedule).
 - npmjs.com: trusted publishing is bound to the caller's workflow file, so publishing runs in the caller's job with the `npm-publish` action. See `templates/ts-lib-npmjs/release.yml`.
 
