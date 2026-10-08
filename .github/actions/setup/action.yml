@@ -81,3 +81,10 @@ runs:
         NODE_AUTH_TOKEN: ${{ inputs.token || (inputs.registry == 'github' && github.token) || '' }}
         CMD: ${{ inputs.install-command }}
       run: bash -euo pipefail -c "$CMD"
+
+    # setup-node's .npmrc references ${NODE_AUTH_TOKEN}; later pnpm steps without it warn on every call.
+    # Empty, not the token: later steps that need registry access set their own (step env wins).
+    - name: Clear registry token for later steps
+      if: steps.resolve.outputs.registry-url != ''
+      shell: bash
+      run: '[[ -v NODE_AUTH_TOKEN ]] || echo "NODE_AUTH_TOKEN=" >> "$GITHUB_ENV"'
