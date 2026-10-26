@@ -4,7 +4,7 @@
   "type": "module",
   "packageManager": "pnpm@10.31.0",
   "devDependencies": {
-    "prisma": "7.10.0"
+    "prisma": "7.10.1"
   },
   "pnpm": {
     "onlyBuiltDependencies": ["@prisma/engines", "prisma"]
