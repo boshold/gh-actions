@@ -45,6 +45,9 @@ inputs:
   secret-token:
     description: Exposed as BuildKit secret id github_npm_token; empty is github.token
     default: ""
+  build-secrets:
+    description: Additional BuildKit secrets in docker/build-push-action secrets format
+    default: ""
   revision:
     description: Build arg DEPLOYMENT_REVISION and OCI revision label; empty is the workflow sha
     default: ""
@@ -114,7 +117,9 @@ runs:
         outputs: ${{ steps.prepare.outputs.outputs }}
         labels: ${{ steps.prepare.outputs.labels }}
         build-args: ${{ steps.prepare.outputs.build-args }}
-        secrets: github_npm_token=${{ inputs.secret-token || github.token }}
+        secrets: |
+          github_npm_token=${{ inputs.secret-token || github.token }}
+          ${{ inputs.build-secrets }}
         provenance: ${{ steps.prepare.outputs.provenance }}
         sbom: ${{ steps.prepare.outputs.sbom == 'true' }}
         cache-from: type=gha,scope=${{ steps.prepare.outputs.cache-scope }}
