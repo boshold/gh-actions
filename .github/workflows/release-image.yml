@@ -49,7 +49,7 @@ on:
       build-args:
         type: string
         default: ""
-        description: Extra build args; DEPLOYMENT_REVISION and APP_VERSION are always passed. Secrets go through BuildKit secret github_npm_token
+        description: Extra build args; DEPLOYMENT_REVISION and APP_VERSION are always passed. Secrets go through packages-token or build-secrets
       platforms:
         type: string
         default: ""
@@ -124,6 +124,9 @@ on:
         type: number
         default: 30
     secrets:
+      build-secrets:
+        required: false
+        description: Additional BuildKit secrets in docker/build-push-action secrets format
       packages-token:
         required: false
         description: BuildKit secret github_npm_token; falls back to github.token
@@ -258,6 +261,7 @@ jobs:
           registry: ${{ inputs.registry }}
           registry-password: ${{ secrets.registry-password || github.token }}
           secret-token: ${{ secrets.packages-token || github.token }}
+          build-secrets: ${{ secrets.build-secrets }}
           revision: ${{ steps.version.outputs.sha }}
           version: ${{ steps.version.outputs.version }}
           provenance: ${{ inputs.provenance }}

@@ -142,6 +142,18 @@ The image and deploy steps expect:
 
 Secrets callers usually pass: `packages-token` (read access to GitHub Packages), `dokploy-api-key`, `release-token` (optional). Do not put secrets in `env`; use `env-secrets`, which is masked.
 
+The `release-image` workflow also accepts an optional `build-secrets` secret in
+`docker/build-push-action` format. It forwards these values to BuildKit alongside
+`github_npm_token`. Keep secret values out of `build-args`; they can appear in image
+metadata. Do not redefine `github_npm_token` in `build-secrets`.
+
+```yaml
+secrets:
+  packages-token: ${{ secrets.PACKAGES_READ_TOKEN }}
+  build-secrets: |
+    sentry_auth_token=${{ secrets.SENTRY_AUTH_TOKEN }}
+```
+
 ## Prisma check
 
 Levels:
