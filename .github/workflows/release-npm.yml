@@ -2,12 +2,12 @@ name: Release npm
 
 # Reusable release of pnpm packages to GitHub Packages. Job build (read-only token, runs dependency
 # code): bump every workspace manifest, commit + tag locally, build, pack. Job publish (write token,
-# no install, no build): fetch the release commit + tag from a git bundle, push them, create the
-# GitHub release, publish the tarballs.
+# no install, no build): fetch the release commit and tag, push them, publish the tarballs,
+# then finalize the GitHub release.
 # npmjs.com: use release-tag.yml + the npm-publish action in a caller job instead (OIDC trusted
 # publishing binds to the caller workflow file); see templates/ts-lib-npmjs.
 # Callers run their CI (stage: release) first, grant contents: write and packages: write.
-# Every step after the push is idempotent: a failed run is fixed by re-running it.
+# Retry the publish job to keep the original build artifact after a partial release.
 
 on:
   workflow_call:
@@ -199,7 +199,7 @@ jobs:
           name: npm-release
           path: ${{ runner.temp }}/npm-release/
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
           overwrite: true
 
   publish:
@@ -220,6 +220,7 @@ jobs:
         with:
           name: npm-release
           path: ${{ runner.temp }}/npm-release
+          digest-mismatch: error
 
       - name: Fetch the release commit and tag
         id: release
@@ -230,21 +231,28 @@ jobs:
           OUT: ${{ runner.temp }}/npm-release
         run: |
           set -euo pipefail
-          if [[ -f "$OUT/release.bundle" ]]; then
+          if ! git show-ref --verify --quiet "refs/tags/$TAG" && [[ -f "$OUT/release.bundle" ]]; then
             git fetch --no-tags "$OUT/release.bundle" "refs/tags/$TAG:refs/tags/$TAG"
           fi
           [[ "$(git rev-parse "refs/tags/$TAG^{commit}")" == "$SHA" ]] || { echo "::error::tag $TAG is not at $SHA"; exit 1; }
-          { echo "packages<<EOF"; sed "s#^#$OUT/#" "$OUT/order.txt"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+          mapfile -t packages < "$OUT/order.txt"
+          (( ${#packages[@]} > 0 )) || { echo "::error::release artifact has no packages"; exit 1; }
+          [[ ! -L "$OUT/packages" ]] || { echo "::error::invalid release package directory"; exit 1; }
+          for file in "${packages[@]}"; do
+            [[ "$file" =~ ^packages/[^/[:cntrl:]]+\.tgz$ && -f "$OUT/$file" && ! -L "$OUT/$file" ]] \
+              || { echo "::error::invalid release package path"; exit 1; }
+          done
+          { echo "packages<<EOF"; printf '%s\n' "${packages[@]/#/$OUT/}"; echo "EOF"; } >> "$GITHUB_OUTPUT"
 
-      - name: Push the release commit and tag, create the release
+      - name: Push the release commit and tag, create a draft
         uses: $/.github/actions/release-publish
         with:
           tag: ${{ needs.build.outputs.tag }}
           sha: ${{ needs.build.outputs.sha }}
           dry-run: ${{ inputs.dry-run }}
-          resumed: ${{ needs.build.outputs.resumed }}
+          resumed: ${{ needs.build.outputs.resumed == 'true' || github.run_attempt > 1 }}
           prerelease: ${{ needs.build.outputs.prerelease }}
-          make-latest: ${{ inputs.make-latest }}
+          draft: true
           token: ${{ secrets.release-token || github.token }}
 
       # No install or build here: only the packed tarballs.
@@ -261,3 +269,13 @@ jobs:
           version: ${{ needs.build.outputs.version }}
           dry-run: ${{ inputs.dry-run }}
           token: ${{ github.token }}
+          verify-artifact-integrity: true
+
+      - name: Publish the GitHub release
+        uses: $/.github/actions/release-publish
+        with:
+          mode: finalize
+          tag: ${{ needs.build.outputs.tag }}
+          dry-run: ${{ inputs.dry-run }}
+          make-latest: ${{ inputs.make-latest }}
+          token: ${{ secrets.release-token || github.token }}

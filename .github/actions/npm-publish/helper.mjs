@@ -1,8 +1,10 @@
-// Helpers for publish.sh: node helper.mjs <list|manifest|dist-tag|lt|json> [...]
+// Helpers for publish.sh: node helper.mjs <list|manifest|integrity|github-version|dist-tag|lt|json> [...]
 import { execFileSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { createReadStream, readFileSync } from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
+import { setTimeout as delay } from 'node:timers/promises'
 
 const [command, ...args] = process.argv.slice(2)
 
@@ -69,16 +71,59 @@ function distTag(version) {
   return /^\d+$/.test(pre[1]) ? 'next' : pre[1]
 }
 
+async function githubVersionIntegrity(name, version, expected, waitForPublish) {
+  if (!/^@[^/\s]+\/[^/\s]+$/u.test(name)) throw new Error(`GitHub Packages needs a scoped package name: ${name}`)
+  const token = process.env.PUBLISH_TOKEN
+  if (!token) throw new Error('GitHub Packages integrity checks need a registry token')
+  const spec = `${name}@${version}`
+  const url = new URL(encodeURIComponent(name), 'https://npm.pkg.github.com/')
+  for (let attempt = 0; attempt < (waitForPublish ? 5 : 1); attempt++) {
+    const response = await fetch(url, {
+      headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.npm.install-v1+json', 'cache-control': 'no-cache' },
+      redirect: 'error',
+      signal: AbortSignal.timeout(10_000),
+    })
+    if (response.status !== 404) {
+      if (!response.ok) throw new Error(`Cannot check ${spec} on GitHub Packages (HTTP ${response.status})`)
+      const metadata = await response.json()
+      const versions = metadata?.versions
+      if (metadata?.name !== name || !versions || typeof versions !== 'object' || Array.isArray(versions)) {
+        throw new Error(`Invalid GitHub Packages metadata for ${spec}`)
+      }
+      if (Object.hasOwn(versions, version)) {
+        if (versions[version]?.dist?.integrity !== expected) {
+          throw new Error(`GitHub Packages integrity mismatch for ${spec}; refusing to publish or reuse it`)
+        }
+        return true
+      }
+    } else await response.body?.cancel()
+    if (!waitForPublish) return false
+    if (attempt < 4) await delay(1000)
+  }
+  throw new Error(`${spec} is not yet visible on GitHub Packages`)
+}
+
 switch (command) {
   case 'list':
     for (const entry of list(args[0])) console.log(entry)
     break
   case 'manifest': {
-    const m = JSON.parse(readFileSync(0, 'utf8'))
-    if (typeof m.name !== 'string' || typeof m.version !== 'string') throw new Error('package.json needs name and version')
+    const m = JSON.parse(readFileSync(args[0], 'utf8'))
+    if (typeof m.name !== 'string' || !m.name || /\s/u.test(m.name) || typeof m.version !== 'string' || !m.version || /\s/u.test(m.version)) {
+      throw new Error('package.json needs name and version without whitespace')
+    }
     console.log([m.name, m.version, m.private === true, m.publishConfig?.registry || '-'].join(' '))
     break
   }
+  case 'integrity': {
+    const hash = createHash('sha512')
+    for await (const chunk of createReadStream(args[0])) hash.update(chunk)
+    console.log(`sha512-${hash.digest('base64')}`)
+    break
+  }
+  case 'github-version':
+    console.log(await githubVersionIntegrity(args[0], args[1], args[2], args[3] === 'wait'))
+    break
   case 'dist-tag':
     console.log(distTag(args[0]))
     break
