@@ -43,6 +43,9 @@ inputs:
   version:
     description: Expected version; a package with another version fails
     default: ""
+  verify-artifact-integrity:
+    description: Check GitHub Packages versions against the SHA-512 of supplied tarballs before skipping or finishing publication
+    default: "false"
 
 outputs:
   published:
@@ -69,5 +72,6 @@ runs:
         NPM_VERSION: ${{ inputs.npm-version }}
         PUBLISH_TOKEN: ${{ inputs.token || (inputs.registry == 'github' && github.token) || '' }}
         EXPECTED_VERSION: ${{ inputs.version }}
+        VERIFY_ARTIFACT_INTEGRITY: ${{ inputs.verify-artifact-integrity }}
         REPO_PRIVATE: ${{ github.event.repository.private }}
       run: bash "$GITHUB_ACTION_PATH/publish.sh"

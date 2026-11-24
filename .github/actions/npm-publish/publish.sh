@@ -7,6 +7,7 @@ set -euo pipefail
 : "${PROVENANCE:=auto}"
 : "${DRY_RUN:=false}"
 : "${STAGE:=false}"
+: "${VERIFY_ARTIFACT_INTEGRITY:=false}"
 : "${GITHUB_OUTPUT:=/dev/null}"
 : "${GITHUB_STEP_SUMMARY:=/dev/null}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,6 +21,10 @@ case "$REGISTRY" in
   github) registry_url=https://npm.pkg.github.com/ ;;
   *) echo "::error::invalid registry: ${REGISTRY} (npmjs, github)"; exit 1 ;;
 esac
+if [[ "$VERIFY_ARTIFACT_INTEGRITY" == true && ( "$REGISTRY" != github || -z "${EXPECTED_VERSION:-}" ) ]]; then
+  echo "::error::artifact integrity checks require GitHub Packages and an expected version"
+  exit 1
+fi
 [[ "$STAGE" != true || "$REGISTRY" == npmjs ]] || { echo "::error::stage needs registry npmjs"; exit 1; }
 
 oidc=false
@@ -73,6 +78,10 @@ for entry in "${entries[@]}"; do
     tarballs+=("$entry")
     continue
   fi
+  if [[ "$VERIFY_ARTIFACT_INTEGRITY" == true ]]; then
+    echo "::error::artifact integrity checks require a tarball: ${entry}"
+    exit 1
+  fi
   [[ -f "$entry/package.json" ]] || { echo "::error::no package.json in ${entry}"; exit 1; }
   rm -rf "${out_dir:?}/$i" && mkdir -p "$out_dir/$i"
   # pnpm pack resolves workspace: and catalog: ranges
@@ -83,8 +92,11 @@ for entry in "${entries[@]}"; do
 done
 
 # --- auth: own userconfig, token only in the npm process env -----------------
-npmrc="$(mktemp)"
-trap 'rm -f "$npmrc"' EXIT
+temp_dir="$(mktemp -d)"
+trap 'rm -rf -- "$temp_dir"' EXIT
+npmrc="$temp_dir/npmrc"
+manifest="$temp_dir/package.json"
+: > "$npmrc"
 host="${registry_url#https:}"
 if [[ -n "${PUBLISH_TOKEN:-}" ]]; then
   # shellcheck disable=SC2016 # npm expands it from the process env
@@ -92,24 +104,59 @@ if [[ -n "${PUBLISH_TOKEN:-}" ]]; then
 fi
 npm_() { NPM_CONFIG_USERCONFIG="$npmrc" NODE_AUTH_TOKEN="${PUBLISH_TOKEN:-}" npm "$@"; }
 
-published=()
-skipped=()
-rows=()
+# Validate every packed manifest and existing version before uploading anything.
+names=()
+versions=()
+integrities=()
+present=()
+declare -A artifact_names=()
 for tarball in "${tarballs[@]}"; do
-  read -r name version private publish_registry < <(tar -xzOf "$tarball" package/package.json | helper manifest) || true
-  [[ -n "${name:-}" && -n "${version:-}" ]] || { echo "::error::cannot read package.json from ${tarball}"; exit 1; }
+  if ! tar -xzOf "$tarball" package/package.json > "$manifest" || ! metadata="$(helper manifest "$manifest")"; then
+    echo "::error::cannot read package.json from ${tarball}"
+    exit 1
+  fi
+  read -r name version private publish_registry <<< "$metadata"
   [[ "$private" == true ]] && { echo "::error::${name} is private and cannot be published"; exit 1; }
   if [[ -n "${EXPECTED_VERSION:-}" && "$version" != "$EXPECTED_VERSION" ]]; then
     echo "::error::${name} has version ${version}, expected ${EXPECTED_VERSION}"
     exit 1
   fi
   if [[ "$publish_registry" != - && "${publish_registry%/}/" != "$registry_url" ]]; then
+    if [[ "$VERIFY_ARTIFACT_INTEGRITY" == true ]]; then
+      echo "::error::${name} publishConfig.registry is ${publish_registry}, expected ${registry_url}"
+      exit 1
+    fi
     echo "::warning::${name} publishConfig.registry is ${publish_registry}, publishing to ${registry_url}"
   fi
 
-  # npm view exits 0 with empty output for a missing version of a known package
-  existing="$(npm_ view "${name}@${version}" version --registry "$registry_url" 2>/dev/null || true)"
-  if [[ "$existing" == "$version" ]]; then
+  names+=("$name")
+  versions+=("$version")
+  [[ "$VERIFY_ARTIFACT_INTEGRITY" == true ]] || continue
+  if [[ -n "${artifact_names[$name]:-}" ]]; then
+    echo "::error::release artifact contains more than one tarball for ${name}"
+    exit 1
+  fi
+  artifact_names[$name]=true
+  [[ "$DRY_RUN" != true ]] || continue
+  integrity="$(helper integrity "$tarball")"
+  integrities+=("$integrity")
+  exists="$(helper github-version "$name" "$version" "$integrity")"
+  present+=("$exists")
+done
+
+published=()
+skipped=()
+rows=()
+for index in "${!tarballs[@]}"; do
+  tarball="${tarballs[index]}"
+  name="${names[index]}"
+  version="${versions[index]}"
+  if [[ "$VERIFY_ARTIFACT_INTEGRITY" != true ]]; then
+    # npm view returns empty for a missing version of a known package.
+    existing="$(npm_ view "${name}@${version}" version --registry "$registry_url" 2>/dev/null || true)"
+    if [[ "$existing" == "$version" ]]; then present[index]=true; fi
+  fi
+  if [[ "${present[index]:-false}" == true ]]; then
     echo "${name}@${version} is already on ${registry_url}, skipping"
     skipped+=("${name}@${version}")
     rows+=("| \`${name}@${version}\` | skipped (already published) |")
@@ -134,6 +181,12 @@ for tarball in "${tarballs[@]}"; do
   published+=("${name}@${version}")
   rows+=("| \`${name}@${version}\` | ${result} |")
 done
+
+if [[ "$VERIFY_ARTIFACT_INTEGRITY" == true && "$DRY_RUN" != true ]]; then
+  for index in "${!tarballs[@]}"; do
+    helper github-version "${names[index]}" "${versions[index]}" "${integrities[index]}" wait >/dev/null
+  done
+fi
 
 printf 'published=%s\n' "$(helper json "${published[@]}")" >> "$GITHUB_OUTPUT"
 printf 'skipped=%s\n' "$(helper json "${skipped[@]}")" >> "$GITHUB_OUTPUT"

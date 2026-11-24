@@ -81,7 +81,7 @@ What keeps the fast stage fast:
 | `node-ci.yml` | CI for libraries, CLIs and Nuxt modules (`preset: nuxt-module`). Pack-and-install smoke, node/OS matrix. |
 | `extra-tests.yml` | The `extra-tests` jobs, used by both CI workflows. Callable on its own. |
 | `prisma-check.yml` | Migration checks against one or more databases (Postgres, SQLite) plus parity between them. |
-| `release-npm.yml` | Version, build, tag, GitHub release, publish to GitHub Packages. |
+| `release-npm.yml` | Version, build, tag, publish to GitHub Packages, finalize the GitHub release. |
 | `release-image.yml` | Version, build image, smoke, scan, push, tag `vX.Y.Z`/`X.Y.Z`/`latest`, release with SBOM. |
 | `release-tag.yml` | Version, tag and GitHub release only. Optional assets with SHA256SUMS. |
 | `release-demo.yml` | Demo image of a module's playground, deployed to Dokploy and stopped again. |
@@ -124,6 +124,7 @@ Details:
 
 - The next version is the highest `vX.Y.Z` tag plus the bump. Root `package.json`, pnpm workspace manifests, `Cargo.toml` (including workspace members) and `version-files` are updated.
 - A failed release can be re-run. If the release commit is already tagged, the run continues with the same version instead of bumping again.
+- For GitHub Packages, retry only the publish job to reuse the original tarballs. The artifact is retained for seven days. Published versions must match the tarballs by SHA-512, and the GitHub release stays in draft until all versions are verified.
 - Only the default branch can release. `dry-run: true` works from any branch and pushes nothing.
 - The push uses `github.token` unless a `release-token` secret is passed. Use a GitHub App token when the default branch is protected. Pushes made with `github.token` do not start other workflows.
 - Images are built once and pushed untagged by digest. Smoke test, scan and SBOM run on that pulled digest, and tags are added to it only after they pass, so the published bytes are the tested ones. `latest` only moves for the highest stable version.
