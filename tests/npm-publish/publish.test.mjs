@@ -170,6 +170,14 @@ test('every tarball manifest must have the correct version before any upload', t
   assert.deepEqual(f.attempts(), [])
 })
 
+test('multiple tarballs for the same package hold all uploads', t => {
+  const f = fixture(t)
+  const result = f.publish([f.pack(names[0]), f.pack(names[0], { description: 'Conflicting bytes' })])
+  assert.notEqual(result.status, 0)
+  assert.match(result.stdout, /more than one tarball/)
+  assert.deepEqual(f.attempts(), [])
+})
+
 test('dry run reads real tarball manifests and sends no registry writes', t => {
   const f = fixture(t)
   const packages = names.map(name => f.pack(name))

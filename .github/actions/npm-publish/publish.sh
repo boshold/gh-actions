@@ -109,6 +109,7 @@ names=()
 versions=()
 integrities=()
 present=()
+declare -A artifact_names=()
 for tarball in "${tarballs[@]}"; do
   if ! tar -xzOf "$tarball" package/package.json > "$manifest" || ! metadata="$(helper manifest "$manifest")"; then
     echo "::error::cannot read package.json from ${tarball}"
@@ -130,12 +131,17 @@ for tarball in "${tarballs[@]}"; do
 
   names+=("$name")
   versions+=("$version")
-  if [[ "$VERIFY_ARTIFACT_INTEGRITY" == true && "$DRY_RUN" != true ]]; then
-    integrity="$(helper integrity "$tarball")"
-    integrities+=("$integrity")
-    exists="$(helper github-version "$name" "$version" "$integrity")"
-    present+=("$exists")
+  [[ "$VERIFY_ARTIFACT_INTEGRITY" == true ]] || continue
+  if [[ -n "${artifact_names[$name]:-}" ]]; then
+    echo "::error::release artifact contains more than one tarball for ${name}"
+    exit 1
   fi
+  artifact_names[$name]=true
+  [[ "$DRY_RUN" != true ]] || continue
+  integrity="$(helper integrity "$tarball")"
+  integrities+=("$integrity")
+  exists="$(helper github-version "$name" "$version" "$integrity")"
+  present+=("$exists")
 done
 
 published=()
